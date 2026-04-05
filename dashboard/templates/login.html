@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MIA — Connexion</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center">
+  <div class="w-full max-w-sm">
+    <div class="bg-white rounded-2xl shadow-lg p-8">
+      <div class="text-center mb-6">
+        <h1 class="text-2xl font-bold text-gray-900">MIA</h1>
+        <p class="text-sm text-gray-500 mt-1">Dashboard administration</p>
+      </div>
+      {% if error %}
+      <div class="mb-4 px-4 py-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">
+        {{ error }}
+      </div>
+      {% endif %}
+      <form method="POST" action="/dashboard/login">
+        <label class="block text-sm font-medium text-gray-700 mb-2">Mot de passe</label>
+        <input type="password" name="password" autofocus required
+               class="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none text-sm"
+               placeholder="Entrer le mot de passe">
+        <button type="submit"
+                class="w-full mt-4 px-4 py-3 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">
+          Se connecter
+        </button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# MIA — Assistante téléphonique restaurant
+# Python 3.11+
+
+# Framework web
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Base de données PostgreSQL
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+
+# OpenAI Realtime API
+openai==1.12.0
+websockets>=12.0
+certifi>=2024.0.0
+
+# Configuration & validation
+python-dotenv==1.0.0
+python-multipart==0.0.9
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# Dashboard admin (templates HTML)
+jinja2==3.1.3
