@@ -18,7 +18,6 @@ certifi>=2024.0.0
 python-dotenv==1.0.0
 python-multipart==0.0.9
 pydantic==2.5.3
-pydantic-settings==2.1.0
 
 # Dashboard admin (templates HTML)
 jinja2==3.1.3

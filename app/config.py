@@ -1,73 +1,47 @@
-"""
-Configuration MIA — chargée depuis les variables d'environnement (.env).
+"""Configuration MIA — chargée depuis les variables d'environnement (.env)."""
+import os
+from dataclasses import dataclass
 
-Les valeurs sensibles (clés API, mots de passe) DOIVENT être définies
-dans .env en production (voir .env.example). Ne jamais déployer avec
-les valeurs par défaut.
-"""
-from pydantic_settings import BaseSettings
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
-class Settings(BaseSettings):
-    """Paramètres chargés depuis .env avec fallback sur les défauts."""
+def _s(k, d=None): v = os.getenv(k, d); return v.strip() if isinstance(v, str) else v
+def _f(k, d):
+    try: return float(os.getenv(k) or d)
+    except ValueError: return d
+def _i(k, d):
+    try: return int(os.getenv(k) or d)
+    except ValueError: return d
 
-    # --- Base de données ---
-    database_url: str = "postgresql://localhost:5432/mia"
 
-    # --- APIs externes ---
-    openai_api_key: str | None = None
-    telnyx_api_key: str | None = None
-    telnyx_phone_number: str | None = None
-
-    # --- Sécurité API ---
-    # Protège /restaurants, /menu, /reservations, /commandes via header X-API-Key.
-    # Vide = pas de protection (acceptable en dev local uniquement).
-    mia_api_key: str | None = None
-
-    # --- Sécurité Dashboard ---
-    # Mot de passe unique pour accéder au dashboard admin (/dashboard).
-    dashboard_password: str = "mia-admin"
-    # Secret HMAC-SHA256 pour signer les cookies de session.
-    # DOIT être >= 32 caractères aléatoires en production.
-    dashboard_secret: str = "change-me-in-production"
-
-    # --- Réseau ---
-    backend_url: str = "http://localhost:8000"
-    # Si défini, utilisé à la place de backend_url pour le WebSocket média.
-    voice_realtime_domain: str | None = None
-
-    # --- Voix OpenAI Realtime ---
-    voice_realtime_voice: str = "coral"
-
-    # --- VAD (Voice Activity Detection) ---
-    # Contrôle la sensibilité de détection parole/silence côté OpenAI.
-    vad_threshold: float = 0.8
-    vad_prefix_padding_ms: int = 500
-    vad_silence_duration_ms: int = 1000
-    # Délai avant de couper la réponse MIA quand le client interrompt.
-    vad_barge_in_delay_ms: int = 800
-    # Seuils minimaux pour considérer qu'une transcription est valide
-    # (filtre le bruit ambiant, les hésitations, etc.).
-    vad_min_transcript_chars: int = 3
-    vad_min_transcript_words: int = 2
+@dataclass(frozen=True)
+class Settings:
+    database_url: str = _s("DATABASE_URL", "postgresql://localhost:5432/mia")
+    openai_api_key: str | None = _s("OPENAI_API_KEY")
+    telnyx_api_key: str | None = _s("TELNYX_API_KEY")
+    telnyx_phone_number: str | None = _s("TELNYX_PHONE_NUMBER")
+    mia_api_key: str | None = _s("MIA_API_KEY")
+    dashboard_password: str = _s("DASHBOARD_PASSWORD", "mia-admin")
+    dashboard_secret: str = _s("DASHBOARD_SECRET", "change-me-in-production")
+    backend_url: str = _s("BACKEND_URL", "http://localhost:8000")
+    voice_realtime_domain: str | None = _s("VOICE_REALTIME_DOMAIN")
+    voice_realtime_voice: str = _s("VOICE_REALTIME_VOICE", "coral")
+    vad_threshold: float = _f("VAD_THRESHOLD", 0.8)
+    vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 500)
+    vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 1000)
 
     @property
     def stream_wss_domain(self) -> str | None:
-        """Domaine WSS pour le stream média Telnyx → notre serveur."""
         d = self.voice_realtime_domain or self.backend_url
-        if d:
-            return d.rstrip("/").replace("https://", "").replace("http://", "")
-        return None
+        return d.rstrip("/").replace("https://", "").replace("http://", "") if d else None
 
     @property
     def has_default_secrets(self) -> bool:
-        """True si les secrets dashboard n'ont pas été changés — dangereux en prod."""
-        return (
-            self.dashboard_secret == "change-me-in-production"
-            or self.dashboard_password == "mia-admin"
-        )
-
-    model_config = {"env_file": ".env", "extra": "ignore"}
+        return self.dashboard_secret == "change-me-in-production" or self.dashboard_password == "mia-admin"
 
 
 settings = Settings()
