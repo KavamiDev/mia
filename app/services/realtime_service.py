@@ -36,6 +36,7 @@ from app.services.telnyx_service import telnyx_transfer
 from app.services.tool_service import execute_tool_call
 
 log = logging.getLogger("mia.realtime")
+conv = logging.getLogger("mia.conv")  # Logger dédié au contenu de la conversation
 
 # Chargé une seule fois au démarrage (le prompt système est statique).
 SYSTEM_PROMPT = (Path(__file__).parent.parent.parent / "prompts" / "mia_system_prompt.md").read_text(encoding="utf-8")
@@ -251,6 +252,20 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                     log.error("[%s] OpenAI error : %s", cid, resp)
                     return
 
+                # --- Transcription du CLIENT (ce que MIA a entendu) ---
+                # Émis par whisper après chaque tour de parole de l'utilisateur.
+                if t == "conversation.item.input_audio_transcription.completed":
+                    transcript = (resp.get("transcript") or "").strip()
+                    if transcript:
+                        conv.info("[%s] 👤 Client : %s", cid, transcript)
+
+                # --- Transcription de MIA (ce qu'elle a dit) ---
+                # Émis quand MIA a fini de générer une réponse audio.
+                if t == "response.output_audio_transcript.done":
+                    transcript = (resp.get("transcript") or "").strip()
+                    if transcript:
+                        conv.info("[%s] 🤖 MIA    : %s", cid, transcript)
+
                 # --- Audio sortant (MIA parle) → forward vers Telnyx ---
                 if t == "response.output_audio.delta" and resp.get("delta") and stream_sid:
                     if not await _safe_send(client_ws, {"event": "media", "streamSid": stream_sid,
@@ -296,6 +311,9 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                         except json.JSONDecodeError:
                             args = {}
 
+                        # Log de la décision de MIA avant exécution
+                        conv.info("[%s] 🔧 Tool   : %s(%s)", cid, item.get("name"), json.dumps(args, ensure_ascii=False))
+
                         # asyncio.to_thread : le tool fait du SQL synchrone + HTTP SMS.
                         # On le déporte sur un thread pour ne pas bloquer la boucle
                         # asyncio qui sert l'audio en parallèle.
@@ -306,6 +324,8 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             restaurant_phone=restaurant.get("telephone"),
                             caller_phone=caller_phone or None,
                             restaurant_name=restaurant.get("nom", ""))
+                        conv.info("[%s] ✓ Result : success=%s%s", cid, result.get("success"),
+                                  f" code={result['code']}" if result.get("code") else "")
 
                         # Flag transfert : on l'exécutera APRÈS que MIA ait fini de
                         # dire « je vous transfère, un instant » (cf. plus bas).
