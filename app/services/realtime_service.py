@@ -301,14 +301,21 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
 
                 # --- Audio sortant (MIA parle) → forward vers Telnyx ---
                 if t == "response.output_audio.delta" and resp.get("delta") and stream_sid:
-                    # OpenAI nous envoie du µ-law brut. Telnyx (mode=rtp)
-                    # attend du RTP encapsulé. On ajoute le header de 12 bytes.
+                    # OpenAI envoie des chunks µ-law de tailles variables (80-200 b).
+                    # Telnyx attend des paquets RTP de 160 bytes pile (20 ms à 8 kHz) :
+                    # tailles différentes = cliquetis audible.
+                    # → on chunke en blocs de 160 bytes, un paquet RTP par bloc,
+                    # le timestamp s'incrémente naturellement de 160 dans wrap_rtp.
                     ulaw_bytes = base64.b64decode(resp["delta"])
-                    rtp_pkt = wrap_rtp(ulaw_bytes)
-                    if not await _safe_send(client_ws, {"event": "media", "streamSid": stream_sid,
-                                                        "media": {"payload": base64.b64encode(rtp_pkt).decode()}}):
-                        # Socket Telnyx fermée → on arrête le bridge.
-                        return
+                    for i in range(0, len(ulaw_bytes), 160):
+                        chunk = ulaw_bytes[i:i + 160]
+                        # Padding pour le dernier chunk s'il est trop court (silence µ-law = 0xFF)
+                        if len(chunk) < 160:
+                            chunk = chunk + b"\xff" * (160 - len(chunk))
+                        rtp_pkt = wrap_rtp(chunk)
+                        if not await _safe_send(client_ws, {"event": "media", "streamSid": stream_sid,
+                                                            "media": {"payload": base64.b64encode(rtp_pkt).decode()}}):
+                            return
 
                 # --- Nouvelle réponse OpenAI démarre ---
                 elif t == "response.created":
