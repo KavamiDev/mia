@@ -20,9 +20,7 @@ import asyncio
 import base64
 import json
 import logging
-import random
 import ssl
-import struct
 import uuid
 from datetime import date
 from pathlib import Path
@@ -183,31 +181,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
         current_response_id = None             # ID de la réponse OpenAI active (pour cancel)
         pending_transfer = False               # True si on doit transférer après le goodbye
 
-        # ─── État RTP pour l'audio sortant vers Telnyx ───
-        # Telnyx en stream_bidirectional_mode="rtp" attend des paquets RTP
-        # (12 bytes de header + payload µ-law). On gère ici la séquence
-        # et le timestamp côté sortie. SSRC aléatoire par session.
-        rtp_seq = random.randint(0, 0xFFFF)
-        rtp_timestamp = random.randint(0, 0xFFFFFFFF)
-        rtp_ssrc = random.randint(0, 0xFFFFFFFF)
-
-        def wrap_rtp(payload: bytes) -> bytes:
-            """Préfixe les bytes audio µ-law d'un header RTP de 12 bytes.
-
-            Format RTP minimal :
-              V=2, P=0, X=0, CC=0      → 0x80
-              M=0, PT=0 (PCMU)          → 0x00
-              sequence (16 bits)
-              timestamp (32 bits, +len par paquet à 8 kHz)
-              SSRC (32 bits, fixe par session)
-            """
-            nonlocal rtp_seq, rtp_timestamp
-            rtp_seq = (rtp_seq + 1) & 0xFFFF
-            rtp_timestamp = (rtp_timestamp + len(payload)) & 0xFFFFFFFF
-            header = struct.pack("!BBHII", 0x80, 0x00, rtp_seq, rtp_timestamp, rtp_ssrc)
-            return header + payload
-
-        # ───────────────────────────────────────
+# ───────────────────────────────────────
         # Tâche 1 : Telnyx → OpenAI
         # ───────────────────────────────────────
         async def receive_from_client():
@@ -301,21 +275,12 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
 
                 # --- Audio sortant (MIA parle) → forward vers Telnyx ---
                 if t == "response.output_audio.delta" and resp.get("delta") and stream_sid:
-                    # OpenAI envoie des chunks µ-law de tailles variables (80-200 b).
-                    # Telnyx attend des paquets RTP de 160 bytes pile (20 ms à 8 kHz) :
-                    # tailles différentes = cliquetis audible.
-                    # → on chunke en blocs de 160 bytes, un paquet RTP par bloc,
-                    # le timestamp s'incrémente naturellement de 160 dans wrap_rtp.
-                    ulaw_bytes = base64.b64decode(resp["delta"])
-                    for i in range(0, len(ulaw_bytes), 160):
-                        chunk = ulaw_bytes[i:i + 160]
-                        # Padding pour le dernier chunk s'il est trop court (silence µ-law = 0xFF)
-                        if len(chunk) < 160:
-                            chunk = chunk + b"\xff" * (160 - len(chunk))
-                        rtp_pkt = wrap_rtp(chunk)
-                        if not await _safe_send(client_ws, {"event": "media", "streamSid": stream_sid,
-                                                            "media": {"payload": base64.b64encode(rtp_pkt).decode()}}):
-                            return
+                    # Telnyx accepte le µ-law brut en sortie (testé : voix
+                    # cristalline avant qu'on ne wrap en RTP). On forward
+                    # directement le delta OpenAI sans toucher.
+                    if not await _safe_send(client_ws, {"event": "media", "streamSid": stream_sid,
+                                                        "media": {"payload": resp["delta"]}}):
+                        return
 
                 # --- Nouvelle réponse OpenAI démarre ---
                 elif t == "response.created":
