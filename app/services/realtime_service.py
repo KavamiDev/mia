@@ -111,27 +111,31 @@ async def _safe_send(ws: WebSocket, payload: dict) -> bool:
         return False
 
 
-async def _init_session(openai_ws, instructions: str) -> None:
-    """Configure la session OpenAI : audio PCMU, VAD serveur, tools.
+async def _init_session(openai_ws, instructions: str, transcription_prompt: str = "") -> None:
+    """Configure la session OpenAI : audio PCMU, VAD serveur, transcription FR, tools.
 
     PCMU (G.711 µ-law) est le codec téléphonique standard utilisé par
     Telnyx — on évite ainsi un transcodage côté serveur.
 
     `server_vad` : c'est OpenAI qui détecte la fin de la parole côté
     utilisateur, déclenche automatiquement une réponse (create_response=True).
-    Plus simple et fiable que de gérer la détection nous-mêmes.
 
-    Pas de `transcription` configurée : sur l'audio téléphonique 8 kHz, les
-    transcripteurs (whisper, gpt-4o-transcribe) hallucinent et polluent le
-    contexte de conversation que le modèle voit. Le modèle gpt-4o-realtime
-    a sa propre compréhension audio native, plus robuste sans ces transcriptions.
+    Transcription `gpt-4o-transcribe` AVEC bias lexical : on injecte les
+    plats du menu + le vocabulaire métier dans le `prompt`, ce qui force
+    le transcripteur à reconnaître ces mots plutôt que d'halluciner sur
+    de l'audio téléphonique bruité 8 kHz.
     """
+    transcription_cfg = {"model": "gpt-4o-transcribe", "language": "fr"}
+    if transcription_prompt:
+        transcription_cfg["prompt"] = transcription_prompt
+
     await openai_ws.send(json.dumps({"type": "session.update", "session": {
         "type": "realtime", "model": "gpt-4o-realtime-preview",
         "output_modalities": ["audio"], "instructions": instructions,
         "audio": {
             "input": {
                 "format": {"type": "audio/pcmu"},
+                "transcription": transcription_cfg,
                 "turn_detection": {
                     "type": "server_vad", "threshold": settings.vad_threshold,
                     "prefix_padding_ms": settings.vad_prefix_padding_ms,
@@ -157,9 +161,22 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
     cid = str(uuid.uuid4())[:8]  # ID court pour corréler les logs d'un appel
     menu = menu or []
     instructions = _build_instructions(restaurant, menu, caller_phone)
-    # Le greeting est un message "user" virtuel qui demande à MIA de saluer.
-    # Plus naturel que de lui envoyer une phrase pré-écrite à dire telle quelle.
-    greeting = f"Salue le client : 'Bonjour, bienvenue chez {restaurant.get('nom', 'le restaurant')}, MIA à l'appareil.'"
+
+    # Construit le bias de transcription : vocabulaire attendu côté client.
+    # Aide whisper/gpt-4o-transcribe à reconnaître ces mots dans l'audio bruité.
+    nom = restaurant.get("nom", "le restaurant")
+    plats = ", ".join(m.get("nom_plat", "") for m in menu[:15] if m.get("nom_plat"))
+    transcription_prompt = (
+        f"Conversation téléphonique en français avec un restaurant nommé {nom}. "
+        f"Vocabulaire attendu : réservation, commande à emporter, table, personnes, "
+        f"heure, date, menu, prix, horaires, addition, transférer, patron, équipe. "
+        f"Plats : {plats}."
+    )
+
+    # Greeting : éviter "chez Chez Marco" si le nom commence déjà par "Chez/Au/Le/La".
+    nom_prefixe = nom.lower().split(" ", 1)[0] if nom else ""
+    chez = "" if nom_prefixe in ("chez", "au", "aux", "le", "la", "les", "l'") else "chez "
+    greeting = f"Salue le client : 'Bonjour, bienvenue {chez}{nom}, MIA à l'appareil.'"
 
     # certifi fournit les CA Mozilla — nécessaire dans certains conteneurs où
     # le bundle CA système n'est pas à jour.
@@ -171,7 +188,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
         additional_headers={"Authorization": f"Bearer {settings.openai_api_key}"},
         ssl=ssl_ctx,
     ) as openai_ws:
-        await _init_session(openai_ws, instructions)
+        await _init_session(openai_ws, instructions, transcription_prompt)
         log.info("[%s] OpenAI connecté — %s (%d plats)", cid, restaurant.get("nom"), len(menu))
 
         # ─── État partagé entre les 3 tâches ───
