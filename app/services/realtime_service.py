@@ -119,16 +119,23 @@ async def _init_session(openai_ws, instructions: str) -> None:
     `server_vad` : c'est OpenAI qui détecte la fin de la parole côté
     utilisateur, déclenche automatiquement une réponse (create_response=True).
     Plus simple et fiable que de gérer la détection nous-mêmes.
+
+    `transcription.language: "fr"` : force whisper à transcrire en français.
+    Sans ça, le modèle hésite entre langues sur des fragments courts/bruités,
+    ce qui dégrade lourdement la compréhension en téléphonique 8 kHz.
     """
     await openai_ws.send(json.dumps({"type": "session.update", "session": {
-        "type": "realtime", "model": "gpt-4o-mini-realtime-preview",
+        "type": "realtime", "model": "gpt-4o-realtime-preview",
         "output_modalities": ["audio"], "instructions": instructions,
         "audio": {
-            "input": {"format": {"type": "audio/pcmu"}, "turn_detection": {
-                "type": "server_vad", "threshold": settings.vad_threshold,
-                "prefix_padding_ms": settings.vad_prefix_padding_ms,
-                "silence_duration_ms": settings.vad_silence_duration_ms,
-                "create_response": True}},
+            "input": {
+                "format": {"type": "audio/pcmu"},
+                "transcription": {"model": "whisper-1", "language": "fr"},
+                "turn_detection": {
+                    "type": "server_vad", "threshold": settings.vad_threshold,
+                    "prefix_padding_ms": settings.vad_prefix_padding_ms,
+                    "silence_duration_ms": settings.vad_silence_duration_ms,
+                    "create_response": True}},
             "output": {"format": {"type": "audio/pcmu"}, "voice": settings.voice_realtime_voice}},
         "tools": REALTIME_TOOLS, "tool_choice": "auto"}}))
 
@@ -159,7 +166,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
     log.info("[%s] Connexion OpenAI Realtime...", cid)
 
     async with websockets.connect(
-        "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
+        "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
         additional_headers={"Authorization": f"Bearer {settings.openai_api_key}"},
         ssl=ssl_ctx,
     ) as openai_ws:
