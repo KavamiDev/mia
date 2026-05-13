@@ -44,6 +44,9 @@ class Settings:
     openai_api_key: str | None = _s("OPENAI_API_KEY")
     telnyx_api_key: str | None = _s("TELNYX_API_KEY")
     telnyx_phone_number: str | None = _s("TELNYX_PHONE_NUMBER")  # Expéditeur SMS
+    # Clé publique Telnyx pour vérifier la signature Ed25519 des webhooks.
+    # À récupérer sur https://portal.telnyx.com (Account > Public Key).
+    telnyx_public_key: str | None = _s("TELNYX_PUBLIC_KEY")
 
     # --- Sécurité ---
     # Protège l'API REST /restaurants, /menu, etc. via header X-API-Key.
@@ -79,6 +82,13 @@ class Settings:
     def has_default_secrets(self) -> bool:
         """Détecte les secrets non changés : alerte au startup pour bloquer le déploiement."""
         return self.dashboard_secret == "change-me-in-production" or self.dashboard_password == "mia-admin"
+
+    @property
+    def looks_like_production(self) -> bool:
+        """Heuristique : si BACKEND_URL est public (https + pas localhost/ngrok), on est en prod."""
+        url = (self.backend_url or "").lower()
+        return ("localhost" not in url and "127.0.0.1" not in url
+                and "ngrok" not in url and url.startswith("https://"))
 
 
 # Singleton global utilisé partout dans l'app via `from app.config import settings`.

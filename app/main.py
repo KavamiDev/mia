@@ -40,16 +40,34 @@ app.include_router(voice_webhook.router, prefix="/voice")
 
 @app.on_event("startup")
 def _check_config():
-    """Alerte sur les configurations dangereuses au démarrage.
+    """Vérifie les configurations au démarrage.
 
-    Ces warnings ne BLOQUENT PAS le démarrage — c'est volontaire pour
-    permettre un setup progressif (dev → staging → prod). Mais ils
-    apparaissent dans les logs et doivent être traités avant prod.
+    En production (BACKEND_URL https public), un secret par défaut bloque
+    le démarrage — fail-fast plutôt que de tourner avec une faille béante.
+    En dev/staging, on log un warning.
     """
+    is_prod = settings.looks_like_production
+
     if settings.has_default_secrets:
-        log.warning("SECURITE : DASHBOARD_PASSWORD/SECRET par défaut — changez-les en .env avant déploiement.")
+        msg = "SECURITE : DASHBOARD_PASSWORD/SECRET par défaut détectés."
+        if is_prod:
+            raise RuntimeError(
+                f"{msg} Refus de démarrer en production. "
+                "Définis DASHBOARD_PASSWORD et DASHBOARD_SECRET dans .env."
+            )
+        log.warning("%s Changez-les avant déploiement.", msg)
+
     if not settings.mia_api_key:
-        log.warning("SECURITE : MIA_API_KEY non définie — API REST sans authentification.")
+        msg = "SECURITE : MIA_API_KEY non définie — API REST sans authentification."
+        if is_prod:
+            raise RuntimeError(f"{msg} Refus de démarrer en production.")
+        log.warning(msg)
+
+    if is_prod and not settings.telnyx_public_key:
+        log.warning(
+            "SECURITE : TELNYX_PUBLIC_KEY non définie en prod — les webhooks "
+            "Telnyx sont acceptés sans vérification de signature."
+        )
     if not settings.openai_api_key:
         log.warning("OPENAI_API_KEY manquante — les appels échoueront.")
     if not settings.telnyx_api_key:

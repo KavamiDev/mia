@@ -11,8 +11,11 @@ Flux complet d'un appel :
 """
 import asyncio
 import base64
+import hmac
 import json
 import logging
+import time
+from hashlib import sha256
 
 from fastapi import APIRouter, Depends, Request, WebSocket
 from fastapi.responses import JSONResponse
@@ -22,11 +25,45 @@ from app.config import settings
 from app.database import SessionLocal, get_db
 from app.models import MenuItem, Restaurant
 from app.services.realtime_service import run_realtime_bridge
-from app.services.telnyx_service import telnyx_answer
+from app.services.telnyx_service import telnyx_answer, verify_telnyx_signature
 from app.utils.phone import matches_phone, normalize_phone
 
 router = APIRouter(tags=["voice"])
 log = logging.getLogger("mia.voice")
+
+# Durée de validité d'un client_state signé : un appel doit s'établir vite.
+_CLIENT_STATE_TTL_SECONDS = 120
+
+
+def _sign_client_state(payload: dict) -> str:
+    """Sérialise + signe le client_state avec HMAC-SHA256.
+
+    Format : base64(JSON{...payload, ts}).<hex_sig_16_bytes>
+    Empêche un attaquant d'ouvrir /voice/media-stream avec un restaurant_id forgé.
+    """
+    secret = (settings.dashboard_secret or "").encode()
+    body = {**payload, "ts": int(time.time())}
+    body_b64 = base64.b64encode(json.dumps(body, separators=(",", ":")).encode()).decode()
+    sig = hmac.new(secret, body_b64.encode(), sha256).hexdigest()[:32]
+    return f"{body_b64}.{sig}"
+
+
+def _verify_client_state(token: str) -> dict | None:
+    """Vérifie signature + expiration. Retourne le payload décodé ou None si invalide."""
+    if not token or "." not in token:
+        return None
+    body_b64, sig = token.rsplit(".", 1)
+    secret = (settings.dashboard_secret or "").encode()
+    expected = hmac.new(secret, body_b64.encode(), sha256).hexdigest()[:32]
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        data = json.loads(base64.b64decode(body_b64).decode())
+        if int(time.time()) - int(data.get("ts", 0)) > _CLIENT_STATE_TTL_SECONDS:
+            return None
+        return data
+    except Exception:
+        return None
 
 
 def _find_restaurant(db: Session, to_num: str | None) -> Restaurant | None:
@@ -57,9 +94,17 @@ async def handle_telnyx_webhook(request: Request, db: Session = Depends(get_db))
 
     Telnyx peut envoyer d'autres events (call.hangup, call.answered, etc.)
     qu'on ignore — on n'agit que sur l'initiation.
+
+    Sécurité : vérifie la signature Ed25519 Telnyx pour bloquer les webhooks
+    forgés (sinon un attaquant peut consommer notre clé API + générer des coûts).
     """
+    raw_body = await request.body()
+    if not verify_telnyx_signature(request.headers, raw_body):
+        log.warning("Webhook Telnyx rejeté : signature invalide")
+        return JSONResponse({"error": "Invalid signature"}, status_code=401)
+
     try:
-        body = await request.json()
+        body = json.loads(raw_body)
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
@@ -85,16 +130,18 @@ async def handle_telnyx_webhook(request: Request, db: Session = Depends(get_db))
         log.warning("Numéro non configuré : %s", to_num)
         return JSONResponse({"status": "ok"})
 
-    # On encode l'état nécessaire au bridge dans client_state.
-    # Telnyx le retransmettra dans le message 'start' du WebSocket, ce qui
-    # évite une seconde requête DB et passe le caller_phone sans nouveau lookup.
-    client_state = base64.b64encode(json.dumps({
-        "restaurant_id": restaurant.id, "caller_phone": caller, "call_control_id": call_id,
-    }).encode()).decode()
+    # client_state SIGNÉ : HMAC-SHA256(dashboard_secret) avec horodatage.
+    # Empêche un attaquant d'ouvrir /voice/media-stream en forgeant un restaurant_id.
+    client_state = _sign_client_state({
+        "restaurant_id": restaurant.id,
+        "caller_phone": caller,
+        "call_control_id": call_id,
+    })
     stream_url = f"wss://{settings.stream_wss_domain}/voice/media-stream"
 
-    # telnyx_answer : décroche l'appel et instruit Telnyx d'ouvrir la WS.
-    if not telnyx_answer(call_id, stream_url, client_state):
+    # telnyx_answer fait un HTTP synchrone — déporté en thread pour ne pas
+    # bloquer la boucle asyncio qui sert d'autres appels en parallèle.
+    if not await asyncio.to_thread(telnyx_answer, call_id, stream_url, client_state):
         log.error("Échec answer Telnyx pour call %s", call_id)
     return JSONResponse({"status": "ok"})
 
@@ -124,14 +171,20 @@ async def handle_media_stream(websocket: WebSocket):
         await websocket.close(code=4000)  # 4000 = abnormal closure côté applicatif
         return
 
-    # ─── Étape 2 : décoder le client_state injecté dans /voice/incoming ───
+    # ─── Étape 2 : vérifier signature + décoder le client_state ───
+    # Si la signature HMAC est invalide ou expirée (>120s), on refuse la
+    # connexion : c'est probablement un attaquant qui tente d'ouvrir le WS
+    # avec un restaurant_id forgé.
+    state = _verify_client_state(start_msg.get("start", {}).get("client_state", ""))
+    if not state:
+        log.warning("media-stream : client_state invalide ou expiré — fermeture")
+        await websocket.close(code=4001)
+        return
     try:
-        state = json.loads(base64.b64decode(start_msg["start"]["client_state"]).decode())
         rid = int(state["restaurant_id"])
         caller_phone = state.get("caller_phone", "") or ""
         call_control_id = state.get("call_control_id", "") or ""
-    except Exception:
-        # client_state corrompu ou absent → on ne peut rien faire.
+    except (KeyError, ValueError):
         await websocket.close(code=4000)
         return
 
@@ -153,10 +206,18 @@ async def handle_media_stream(websocket: WebSocket):
     finally:
         db.close()
 
-    # ─── Étape 4 : lancer le bridge et le laisser tourner jusqu'à la fin de l'appel ───
+    # ─── Étape 4 : lancer le bridge avec un timeout global ───
+    # Coupe-circuit anti-coût : si un appel reste ouvert >10 min, on tue la
+    # session. OpenAI Realtime coûte ~0.30$/min input audio, un bug qui boucle
+    # peut générer des dizaines d'euros silencieusement.
     try:
-        await run_realtime_bridge(websocket, restaurant, menu=menu, caller_phone=caller_phone,
-                                  call_control_id=call_control_id, initial_messages=buffered)
+        await asyncio.wait_for(
+            run_realtime_bridge(websocket, restaurant, menu=menu, caller_phone=caller_phone,
+                                call_control_id=call_control_id, initial_messages=buffered),
+            timeout=600,
+        )
+    except asyncio.TimeoutError:
+        log.warning("media-stream : appel >10min, coupé par timeout global")
     except Exception as e:
         log.exception("media-stream : %s", e)
     finally:
