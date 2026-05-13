@@ -131,7 +131,7 @@ async def _init_session(openai_ws, instructions: str) -> None:
         "audio": {
             "input": {
                 "format": {"type": "audio/pcmu"},
-                "transcription": {"model": "whisper-1", "language": "fr"},
+                "transcription": {"model": "gpt-4o-transcribe", "language": "fr"},
                 "turn_detection": {
                     "type": "server_vad", "threshold": settings.vad_threshold,
                     "prefix_padding_ms": settings.vad_prefix_padding_ms,
