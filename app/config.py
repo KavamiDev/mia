@@ -65,9 +65,9 @@ class Settings:
     voice_realtime_voice: str = _s("VOICE_REALTIME_VOICE", "coral")
     # VAD = Voice Activity Detection. Contrôle quand OpenAI considère
     # que l'utilisateur a fini de parler et déclenche une réponse.
-    vad_threshold: float = _f("VAD_THRESHOLD", 0.5)              # 0..1, sensibilité (bas = capte mieux la parole faible/téléphonique)
+    vad_threshold: float = _f("VAD_THRESHOLD", 0.6)              # 0..1, sensibilité (compromis téléphonique/bruit)
     vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 500) # Audio pré-speech
-    vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 1000)  # Silence min
+    vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 1500)  # Silence min — long pour capturer phrases entières
 
     @property
     def stream_wss_domain(self) -> str | None:

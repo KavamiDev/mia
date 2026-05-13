@@ -121,9 +121,10 @@ async def _init_session(openai_ws, instructions: str) -> None:
     utilisateur, déclenche automatiquement une réponse (create_response=True).
     Plus simple et fiable que de gérer la détection nous-mêmes.
 
-    `transcription.language: "fr"` : force whisper à transcrire en français.
-    Sans ça, le modèle hésite entre langues sur des fragments courts/bruités,
-    ce qui dégrade lourdement la compréhension en téléphonique 8 kHz.
+    Pas de `transcription` configurée : sur l'audio téléphonique 8 kHz, les
+    transcripteurs (whisper, gpt-4o-transcribe) hallucinent et polluent le
+    contexte de conversation que le modèle voit. Le modèle gpt-4o-realtime
+    a sa propre compréhension audio native, plus robuste sans ces transcriptions.
     """
     await openai_ws.send(json.dumps({"type": "session.update", "session": {
         "type": "realtime", "model": "gpt-4o-realtime-preview",
@@ -131,7 +132,6 @@ async def _init_session(openai_ws, instructions: str) -> None:
         "audio": {
             "input": {
                 "format": {"type": "audio/pcmu"},
-                "transcription": {"model": "gpt-4o-transcribe", "language": "fr"},
                 "turn_detection": {
                     "type": "server_vad", "threshold": settings.vad_threshold,
                     "prefix_padding_ms": settings.vad_prefix_padding_ms,
