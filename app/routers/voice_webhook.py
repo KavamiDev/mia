@@ -38,27 +38,33 @@ _CLIENT_STATE_TTL_SECONDS = 120
 def _sign_client_state(payload: dict) -> str:
     """Sérialise + signe le client_state avec HMAC-SHA256.
 
-    Format : base64(JSON{...payload, ts}).<hex_sig_16_bytes>
-    Empêche un attaquant d'ouvrir /voice/media-stream avec un restaurant_id forgé.
+    Format final : base64(JSON{...payload, ts, sig})
+    Telnyx exige que le client_state soit un base64 valide (pas de séparateur),
+    donc on intègre la signature DANS le JSON avant d'encoder.
     """
     secret = (settings.dashboard_secret or "").encode()
     body = {**payload, "ts": int(time.time())}
-    body_b64 = base64.b64encode(json.dumps(body, separators=(",", ":")).encode()).decode()
-    sig = hmac.new(secret, body_b64.encode(), sha256).hexdigest()[:32]
-    return f"{body_b64}.{sig}"
+    body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    sig = hmac.new(secret, body_json.encode(), sha256).hexdigest()[:32]
+    body["sig"] = sig
+    return base64.b64encode(json.dumps(body, separators=(",", ":")).encode()).decode()
 
 
 def _verify_client_state(token: str) -> dict | None:
     """Vérifie signature + expiration. Retourne le payload décodé ou None si invalide."""
-    if not token or "." not in token:
-        return None
-    body_b64, sig = token.rsplit(".", 1)
-    secret = (settings.dashboard_secret or "").encode()
-    expected = hmac.new(secret, body_b64.encode(), sha256).hexdigest()[:32]
-    if not hmac.compare_digest(sig, expected):
+    if not token:
         return None
     try:
-        data = json.loads(base64.b64decode(body_b64).decode())
+        data = json.loads(base64.b64decode(token).decode())
+        sig_received = data.pop("sig", "")
+        if not sig_received:
+            return None
+        # Reconstruit le body sans 'sig' pour recalculer la signature attendue.
+        body_json = json.dumps(data, separators=(",", ":"), sort_keys=True)
+        secret = (settings.dashboard_secret or "").encode()
+        expected = hmac.new(secret, body_json.encode(), sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig_received, expected):
+            return None
         if int(time.time()) - int(data.get("ts", 0)) > _CLIENT_STATE_TTL_SECONDS:
             return None
         return data
