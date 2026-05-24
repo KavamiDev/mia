@@ -48,6 +48,17 @@ class Settings:
     # À récupérer sur https://portal.telnyx.com (Account > Public Key).
     telnyx_public_key: str | None = _s("TELNYX_PUBLIC_KEY")
 
+    # --- OVH SMS (fallback pour +262 La Réunion / Mayotte) ---
+    # Telnyx ne livre pas de SMS vers les DOM Océan Indien. On bascule sur
+    # OVH SMS pour ces numéros. Si non configuré, les SMS +262 échouent
+    # silencieusement (log warning, pas de crash).
+    # Setup OVH : https://eu.api.ovh.com/createToken/ (droits POST /sms/*/jobs)
+    ovh_application_key: str | None = _s("OVH_APPLICATION_KEY")
+    ovh_application_secret: str | None = _s("OVH_APPLICATION_SECRET")
+    ovh_consumer_key: str | None = _s("OVH_CONSUMER_KEY")
+    ovh_sms_account: str | None = _s("OVH_SMS_ACCOUNT")        # ex: "sms-cs12345-1"
+    ovh_sms_sender: str = _s("OVH_SMS_SENDER", "MIA")          # ≤ 11 chars alphanumériques
+
     # --- Sécurité ---
     # Protège l'API REST /restaurants, /menu, etc. via header X-API-Key.
     # Si vide : aucune protection (acceptable en dev local seulement).
