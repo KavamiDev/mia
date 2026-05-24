@@ -32,6 +32,7 @@ from fastapi.websockets import WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from app.config import settings
+from app.services.audio_debug import AudioDumper, strip_rtp_header
 from app.services.telnyx_service import telnyx_transfer
 from app.services.tool_service import execute_tool_call
 
@@ -198,6 +199,12 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
         current_response_id = None             # ID de la réponse OpenAI active (pour cancel)
         pending_transfer = False               # True si on doit transférer après le goodbye
 
+        # Dumper audio optionnel (debug du flux entrant). Activé via env
+        # AUDIO_DEBUG_DIR. Écrit un .wav µ-law avec les 5 premières secondes
+        # d'audio entrant pour valider à l'oreille que le décodage RTP est OK.
+        audio_dumper = (AudioDumper(cid, settings.audio_debug_dir, max_seconds=5)
+                        if settings.audio_debug_dir else None)
+
 # ───────────────────────────────────────
         # Tâche 1 : Telnyx → OpenAI
         # ───────────────────────────────────────
@@ -221,12 +228,15 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                         # Filtre : on ne traite que l'audio entrant (du client),
                         # pas celui qu'on a déjà envoyé (echo Telnyx).
                         if media.get("track", "inbound") == "inbound":
-                            # Telnyx (mode=rtp) envoie : [12 bytes RTP header][µ-law payload].
-                            # OpenAI attend du µ-law BRUT. On dégage le header
-                            # avant de forwarder, sinon les 12 bytes de header
-                            # binaire polluent le signal et OpenAI hallucine.
+                            # Telnyx (mode=rtp) envoie : [RTP header variable][µ-law payload].
+                            # Le header fait 12 bytes minimum mais peut être plus
+                            # gros (CSRC, extension). On utilise un parser RFC 3550
+                            # robuste pour ne pas laisser de bytes parasites en
+                            # début de signal (cause d'hallucinations OpenAI).
                             rtp_pkt = base64.b64decode(media["payload"])
-                            raw_ulaw = rtp_pkt[12:] if len(rtp_pkt) > 12 else rtp_pkt
+                            raw_ulaw = strip_rtp_header(rtp_pkt)
+                            if audio_dumper:
+                                audio_dumper.write(raw_ulaw)
                             await openai_ws.send(json.dumps({
                                 "type": "input_audio_buffer.append",
                                 "audio": base64.b64encode(raw_ulaw).decode()}))
@@ -383,3 +393,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
             pass
         except Exception as e:
             log.exception("[%s] Erreur bridge : %s", cid, e)
+        finally:
+            # Force le flush du dump audio même si l'appel coupe avant les 5s.
+            if audio_dumper:
+                audio_dumper.close()

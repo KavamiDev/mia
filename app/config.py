@@ -68,9 +68,22 @@ class Settings:
     voice_realtime_voice: str = _s("VOICE_REALTIME_VOICE", "coral")
     # VAD = Voice Activity Detection. Contrôle quand OpenAI considère
     # que l'utilisateur a fini de parler et déclenche une réponse.
+    #
+    # Calibration latence (goal : <1.5 s perçue) :
+    #   silence_duration_ms + inference OpenAI (~400ms) + réseau (~150ms) = latence totale
+    #   À 700ms → ~1.25s perçue. Acceptable pour téléphone.
+    #   À 1500ms → ~2.05s, perçu comme "long" par l'appelant.
+    # Si MIA coupe trop tôt en cours de phrase, monter à 900-1100ms.
     vad_threshold: float = _f("VAD_THRESHOLD", 0.6)              # 0..1, sensibilité (compromis téléphonique/bruit)
-    vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 500) # Audio pré-speech
-    vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 1500)  # Silence min — long pour capturer phrases entières
+    vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 300) # Court → meilleure réactivité
+    vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 700)   # Silence min — calibré pour ~1.25s latence
+
+    # --- Debug audio (optionnel) ---
+    # Si défini, dump les 5 premières secondes d'audio entrant de chaque appel
+    # dans ce dossier sous forme de .wav µ-law (lisible par QuickTime/VLC).
+    # Permet de valider MANUELLEMENT que le bridge décode bien l'audio Telnyx.
+    # ⚠ Laisser vide en prod (RGPD : ces fichiers contiennent la voix du client).
+    audio_debug_dir: str | None = _s("AUDIO_DEBUG_DIR")
 
     @property
     def stream_wss_domain(self) -> str | None:
