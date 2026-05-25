@@ -7,3 +7,8 @@ __pycache__/
 logs/
 .claude/
 .venv-test/
+
+# Audio fixtures réelles (RGPD : voix client).
+# Le README explique comment les capturer localement.
+tests/audio_fixtures/*.wav
+!tests/audio_fixtures/README.md

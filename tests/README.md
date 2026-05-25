@@ -22,13 +22,16 @@ python3 -m venv .venv-test
 | Fichier | Couvre |
 |---|---|
 | `test_audio.py` | Parser RTP (RFC 3550) + AudioDumper WAV µ-law |
+| `test_audio_e2e.py` | Helpers replay wav + mock OpenAI WebSocket + round-trip RTP |
 | `test_phone.py` | Normalisation E.164 (métropole + Réunion + Mayotte) + détection +262 |
 | `test_sms.py` | Routage Telnyx/OVH + signature OVH + fallback silencieux |
 | `test_client_state.py` | Sign/verify HMAC + détection altération + TTL anti-replay |
 | `test_tools.py` | create_reservation, create_commande, quotas, codes, transfert |
 | `test_api.py` | Routes REST + auth X-API-Key + webhook Telnyx |
+| `test_confirmation.py` | Détecteur OUI/NON (chantier 3 — anti-SAV) |
+| `test_calllog.py` | CallTranscript + table call_logs + routes /dashboard/calls |
 
-**Total : 88 tests, < 1 seconde d'exécution.**
+**Total : 168 tests, < 1 seconde d'exécution.**
 
 ## Comment fonctionne le harnais
 

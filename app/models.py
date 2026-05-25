@@ -6,10 +6,11 @@ Tables :
   reservations  — Réservation créée par MIA (code unique, personnes, date/heure)
   commandes     — Commande à emporter créée par MIA (code unique, items JSONB)
   menu          — Plats proposés par chaque restaurant (nom, prix, description)
+  call_logs     — Transcript + tool calls de chaque appel téléphonique (SAV)
 """
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
@@ -80,3 +81,43 @@ class MenuItem(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     restaurant = relationship("Restaurant", back_populates="menu_items")
+
+
+class CallLog(Base):
+    """Trace d'un appel téléphonique complet (transcript + tool calls).
+
+    Objectif : SAV. Quand le restaurateur dit « la résa de jeudi est fausse »,
+    on retrouve l'appel d'origine + ce que MIA a entendu et fait.
+
+    Champs :
+      transcript : liste chronologique [{ts, who: 'client'|'mia', text}]
+      tool_calls : liste [{ts, name, args, success, code, blocked_reason}]
+      reservation_code / commande_code : liens vers les codes générés (si tool exec OK)
+      sav_flagged / sav_notes : drapeau et note libre saisis depuis le dashboard
+
+    ⚠ RGPD : transcript contient des données personnelles (voix de l'appelant).
+    Mettre en place une purge auto (ex: cron quotidien) au-delà de 30 jours.
+    """
+    __tablename__ = "call_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    restaurant_id = Column(Integer, ForeignKey("restaurants.id", ondelete="CASCADE"), nullable=True, index=True)
+    # Téléphone appelant en E.164 (vide pour les appels anonymes/masqués).
+    caller_phone = Column(String(20), nullable=True, index=True)
+    # ID Telnyx — utile pour corréler avec les logs côté provider.
+    call_control_id = Column(String(64), nullable=True)
+    started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    # Transcript chrono : [{"ts": iso, "who": "client"|"mia", "text": "..."}]
+    transcript = Column(JSONB, nullable=False, default=list)
+    # Function calls : [{"ts", "name", "args", "success", "code", "blocked_reason"}]
+    tool_calls = Column(JSONB, nullable=False, default=list)
+    # Liens directs vers les codes générés (recherche rapide).
+    reservation_code = Column(String(10), nullable=True, index=True)
+    commande_code = Column(String(10), nullable=True, index=True)
+    # SAV : flag manuel + note libre du restaurateur/admin.
+    sav_flagged = Column(Boolean, nullable=False, default=False, index=True)
+    sav_notes = Column(Text, nullable=True)
+
+    restaurant = relationship("Restaurant")

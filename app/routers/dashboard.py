@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Commande, MenuItem, Reservation, Restaurant
+from app.models import CallLog, Commande, MenuItem, Reservation, Restaurant
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -325,6 +325,97 @@ async def commandes_page(request: Request, restaurant_id: int | None = None, db:
         "selected_id": restaurant_id, "active": "commandes",
         "flash": "", "flash_type": "",
     })
+
+
+# ──────────────────────────────────────
+# Appels (logs SAV) — lecture + flag manuel
+# ──────────────────────────────────────
+
+@router.get("/calls", response_class=HTMLResponse)
+async def calls_page(
+    request: Request, db: Session = Depends(get_db),
+    restaurant_id: int | None = None,
+    sav_only: bool = False,
+):
+    """Liste des appels téléphoniques avec filtres restaurant + SAV.
+
+    Limite à 100 appels les plus récents pour éviter une page trop lourde.
+    Pour aller plus loin : ajouter pagination + filtre date.
+    """
+    redirect = _require_login(request)
+    if redirect:
+        return redirect
+
+    restaurants = db.query(Restaurant).order_by(Restaurant.nom).all()
+    q = db.query(CallLog).order_by(CallLog.started_at.desc())
+    if restaurant_id:
+        q = q.filter(CallLog.restaurant_id == restaurant_id)
+    if sav_only:
+        q = q.filter(CallLog.sav_flagged.is_(True))
+
+    rmap = {r.id: r.nom for r in restaurants}
+    rows = []
+    for c in q.limit(100).all():
+        rows.append({
+            "id": c.id,
+            "restaurant_nom": rmap.get(c.restaurant_id, "?"),
+            "caller_phone": c.caller_phone or "anonyme",
+            "started_at": c.started_at,
+            "duration_seconds": c.duration_seconds or 0,
+            "transcript_count": len(c.transcript or []),
+            "tool_count": len(c.tool_calls or []),
+            "reservation_code": c.reservation_code,
+            "commande_code": c.commande_code,
+            "sav_flagged": c.sav_flagged,
+        })
+
+    return templates.TemplateResponse("calls.html", {
+        "request": request, "calls": rows, "restaurants": restaurants,
+        "selected_id": restaurant_id, "sav_only": sav_only,
+        "active": "calls", "flash": "", "flash_type": "",
+    })
+
+
+@router.get("/calls/{call_id}", response_class=HTMLResponse)
+async def call_detail(request: Request, call_id: int, db: Session = Depends(get_db)):
+    """Détail d'un appel : transcript chrono + tool calls + flag SAV."""
+    redirect = _require_login(request)
+    if redirect:
+        return redirect
+
+    c = db.query(CallLog).filter(CallLog.id == call_id).first()
+    if not c:
+        return RedirectResponse("/dashboard/calls", status_code=302)
+
+    restaurant = db.query(Restaurant).filter(Restaurant.id == c.restaurant_id).first()
+    return templates.TemplateResponse("call_detail.html", {
+        "request": request, "call": c, "restaurant": restaurant,
+        "active": "calls", "flash": "", "flash_type": "",
+    })
+
+
+@router.post("/calls/{call_id}/sav", response_class=HTMLResponse)
+async def flag_sav(
+    request: Request, call_id: int, db: Session = Depends(get_db),
+    sav_notes: str = Form(""), unflag: str = Form(""),
+):
+    """Flag (ou unflag) un appel comme problématique + ajout d'une note."""
+    redirect = _require_login(request)
+    if redirect:
+        return redirect
+
+    c = db.query(CallLog).filter(CallLog.id == call_id).first()
+    if not c:
+        return RedirectResponse("/dashboard/calls", status_code=302)
+
+    if unflag:
+        c.sav_flagged = False
+        c.sav_notes = None
+    else:
+        c.sav_flagged = True
+        c.sav_notes = sav_notes.strip() or None
+    db.commit()
+    return RedirectResponse(f"/dashboard/calls/{call_id}", status_code=302)
 
 
 # ──────────────────────────────────────

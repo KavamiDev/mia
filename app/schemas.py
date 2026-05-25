@@ -1,5 +1,5 @@
 """
-Schémas Pydantic — validation des données entrantes/sortantes de l'API REST.
+Schémas Pydantic validation des données entrantes/sortantes de l'API REST.
 
 Chaque modèle *Create est utilisé pour les requêtes POST/PUT.
 Chaque modèle *Response est renvoyé par l'API (from_attributes=True permet

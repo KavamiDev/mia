@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.database import Base, engine
 from app.routers import commandes, dashboard, menu, reservations, restaurants, voice_webhook
 
 logging.basicConfig(format="%(asctime)s [%(name)s] %(levelname)s: %(message)s", level=logging.INFO)
@@ -45,7 +46,19 @@ def _check_config():
     En production (BACKEND_URL https public), un secret par défaut bloque
     le démarrage — fail-fast plutôt que de tourner avec une faille béante.
     En dev/staging, on log un warning.
+
+    Crée aussi les tables manquantes (idempotent : ne touche que les nouvelles).
+    Évite de devoir relancer scripts/init_db.sql à chaque ajout de table.
     """
+    # Import models pour que Base.metadata.tables contienne tout avant create_all.
+    from app import models  # noqa: F401
+    try:
+        Base.metadata.create_all(engine)
+    except Exception as e:
+        # En cas d'incompatibilité (ex: connexion DB indispo au boot), on log
+        # et on continue : le startup ne doit pas crasher sur create_all.
+        log.warning("Création tables auto échouée (ignorable si DB déjà OK) : %s", e)
+
     is_prod = settings.looks_like_production
 
     if settings.has_default_secrets:

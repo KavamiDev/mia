@@ -33,8 +33,14 @@ from starlette.websockets import WebSocketState
 
 from app.config import settings
 from app.services.audio_debug import AudioDumper, strip_rtp_header
+from app.services.call_log_service import CallTranscript
 from app.services.telnyx_service import telnyx_transfer
 from app.services.tool_service import execute_tool_call
+from app.utils.confirmation import is_confirmed
+
+# Tools qui modifient l'état (DB + SMS) — exigent une confirmation orale
+# du client juste avant. Sinon : on bloque pour éviter les SAV.
+_CONFIRMED_TOOLS = ("create_reservation", "create_commande")
 
 log = logging.getLogger("mia.realtime")
 conv = logging.getLogger("mia.conv")  # Logger dédié au contenu de la conversation
@@ -198,12 +204,21 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
         last_item = None                       # Dernier item audio en cours de lecture
         current_response_id = None             # ID de la réponse OpenAI active (pour cancel)
         pending_transfer = False               # True si on doit transférer après le goodbye
+        last_client_text = ""                  # Dernière transcription du client (pour confirmation)
 
         # Dumper audio optionnel (debug du flux entrant). Activé via env
         # AUDIO_DEBUG_DIR. Écrit un .wav µ-law avec les 5 premières secondes
         # d'audio entrant pour valider à l'oreille que le décodage RTP est OK.
         audio_dumper = (AudioDumper(cid, settings.audio_debug_dir, max_seconds=5)
                         if settings.audio_debug_dir else None)
+
+        # Buffer transcript pour le dashboard SAV. Flushé en DB à la fin.
+        # Si l'appel échoue avant le moindre échange, flush() est un no-op.
+        call_log = CallTranscript(
+            restaurant_id=restaurant.get("id"),
+            caller_phone=caller_phone,
+            call_control_id=call_control_id,
+        )
 
 # ───────────────────────────────────────
         # Tâche 1 : Telnyx → OpenAI
@@ -271,7 +286,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
         # ───────────────────────────────────────
         async def send_to_client():
             """Lit les events OpenAI : audio sortant, function calls, barge-in."""
-            nonlocal last_item, current_response_id, pending_transfer
+            nonlocal last_item, current_response_id, pending_transfer, last_client_text
             async for msg in openai_ws:
                 resp = json.loads(msg)
                 t = resp.get("type", "")
@@ -292,6 +307,8 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                     transcript = (resp.get("transcript") or "").strip()
                     if transcript:
                         conv.info("[%s] 👤 Client : %s", cid, transcript)
+                        last_client_text = transcript
+                        call_log.add_client(transcript)
 
                 # --- Transcription de MIA (ce qu'elle a dit) ---
                 # Émis quand MIA a fini de générer une réponse audio.
@@ -299,6 +316,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                     transcript = (resp.get("transcript") or "").strip()
                     if transcript:
                         conv.info("[%s] 🤖 MIA    : %s", cid, transcript)
+                        call_log.add_mia(transcript)
 
                 # --- Audio sortant (MIA parle) → forward vers Telnyx ---
                 if t == "response.output_audio.delta" and resp.get("delta") and stream_sid:
@@ -342,19 +360,52 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                         if item.get("type") != "function_call":
                             continue
                         had_calls = True
+                        tool_name = item.get("name", "")
                         try:
                             args = json.loads(item.get("arguments", "{}"))
                         except json.JSONDecodeError:
                             args = {}
 
                         # Log de la décision de MIA avant exécution
-                        conv.info("[%s] 🔧 Tool   : %s(%s)", cid, item.get("name"), json.dumps(args, ensure_ascii=False))
+                        conv.info("[%s] 🔧 Tool   : %s(%s)", cid, tool_name, json.dumps(args, ensure_ascii=False))
+
+                        # ─── GARDE DOUBLE-CONFIRMATION ───
+                        # Pour create_reservation/create_commande, on exige que la
+                        # dernière transcription client contienne un mot de validation
+                        # explicite (« oui », « c'est bon », « validez »...).
+                        # Sinon : on bloque, on log, et on renvoie un faux résultat à
+                        # MIA qui lui dit de refaire son récap.
+                        # → Évite les SAV quand la transcription hallucine un OUI.
+                        if tool_name in _CONFIRMED_TOOLS and not is_confirmed(last_client_text):
+                            blocked_reason = (
+                                f"Pas de confirmation orale détectée dans la dernière "
+                                f"transcription client : {last_client_text!r}"
+                            )
+                            conv.warning("[%s] ⛔ Tool BLOQUÉ (%s) : %s", cid, tool_name, blocked_reason)
+                            call_log.add_tool(tool_name, args, {"success": False},
+                                              blocked_reason=blocked_reason)
+                            fake_result = {
+                                "success": False,
+                                "blocked": True,
+                                "recap_vocal": (
+                                    "Avant de valider, je dois être sûre. Refaites-moi le "
+                                    "récap en disant clairement 'OUI' ou 'c'est bon' pour "
+                                    "que je confirme."
+                                ),
+                            }
+                            await openai_ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {"type": "function_call_output",
+                                         "call_id": item.get("call_id"),
+                                         "output": json.dumps(fake_result)}}))
+                            await openai_ws.send(json.dumps({"type": "response.create"}))
+                            continue  # passe au prochain item sans exécuter le tool
 
                         # asyncio.to_thread : le tool fait du SQL synchrone + HTTP SMS.
                         # On le déporte sur un thread pour ne pas bloquer la boucle
                         # asyncio qui sert l'audio en parallèle.
                         result = await asyncio.to_thread(
-                            execute_tool_call, restaurant["id"], item.get("name"), args,
+                            execute_tool_call, restaurant["id"], tool_name, args,
                             menu=menu, quota_reservations=restaurant.get("quota_reservations"),
                             quota_commandes=restaurant.get("quota_commandes"),
                             restaurant_phone=restaurant.get("telephone"),
@@ -362,6 +413,9 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             restaurant_name=restaurant.get("nom", ""))
                         conv.info("[%s] ✓ Result : success=%s%s", cid, result.get("success"),
                                   f" code={result['code']}" if result.get("code") else "")
+
+                        # Enregistre dans le buffer transcript pour le dashboard SAV
+                        call_log.add_tool(tool_name, args, result)
 
                         # Flag transfert : on l'exécutera APRÈS que MIA ait fini de
                         # dire « je vous transfère, un instant » (cf. plus bas).
@@ -397,3 +451,10 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
             # Force le flush du dump audio même si l'appel coupe avant les 5s.
             if audio_dumper:
                 audio_dumper.close()
+            # Persiste le transcript en DB pour le dashboard SAV. Asynchrone
+            # pour ne pas bloquer le close du WebSocket (mais on attend la fin
+            # quand même pour avoir un log propre dans les serveurs courts).
+            try:
+                await asyncio.to_thread(call_log.flush)
+            except Exception as e:
+                log.warning("[%s] Flush CallLog échec : %s", cid, e)
