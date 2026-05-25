@@ -17,7 +17,7 @@ from datetime import date
 from sqlalchemy import func
 
 from app.database import SessionLocal
-from app.models import Commande, Reservation
+from app.models import Commande, Reservation, Restaurant
 from app.services.sms_service import send_sms
 
 log = logging.getLogger("mia.tools")
@@ -66,7 +66,17 @@ def execute_tool_call(restaurant_id: int, name: str, args: dict, *, menu, quota_
 
 
 def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, restaurant_name) -> dict:
-    """Crée une réservation après vérification du quota journalier."""
+    """Crée une réservation après vérification atomique du quota journalier.
+
+    Pour éviter la race condition (2 appels en // qui voient le quota non
+    atteint et insèrent tous les deux), on lock la ligne du restaurant via
+    SELECT ... FOR UPDATE le temps du check+insert.
+
+    Postgres : lock granulaire sur la ligne, les autres transactions sur le
+              même restaurant attendent. Pas de deadlock car un seul resto/req.
+    SQLite   : FOR UPDATE est silencieusement ignoré, mais SQLite a un lock
+              global writer de toute façon, donc l'atomicité reste garantie.
+    """
     date_req = str(args.get("date", ""))                # Format AAAA-MM-JJ
     personnes = max(int(args.get("personnes", 1)), 1)   # Au moins 1 personne
     heure = str(args.get("heure", ""))                  # Texte libre (ex: "20h30")
@@ -74,11 +84,15 @@ def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, resta
 
     db = SessionLocal()
     try:
-        # Vérification du quota AVANT insertion : un restaurant peut limiter
-        # le nombre de réservations par jour pour éviter la surcharge.
+        # ⚠ Lock atomique du restaurant le temps de la transaction.
+        # Sans ce lock, 2 requêtes concurrentes pourraient toutes deux voir
+        # count() < quota et insérer toutes les deux → quota dépassé.
+        db.query(Restaurant).filter(Restaurant.id == restaurant_id).with_for_update().first()
+
         if quota and db.query(Reservation).filter(
             Reservation.restaurant_id == restaurant_id, Reservation.date == date_req
         ).count() >= quota:
+            db.commit()  # libère le lock même si on return
             return {"success": False, "recap_vocal":
                     "Désolée, plus de table disponible pour cette date. Je peux vous proposer un autre jour ?"}
 
@@ -124,11 +138,16 @@ def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, re
 
     db = SessionLocal()
     try:
+        # ⚠ Lock atomique restaurant pour éviter les races concurrentes
+        # (même pattern que _create_reservation, cf. doc là-bas).
+        db.query(Restaurant).filter(Restaurant.id == restaurant_id).with_for_update().first()
+
         # Quota basé sur created_at (date du jour côté serveur, pas date demandée).
         if quota and db.query(Commande).filter(
             Commande.restaurant_id == restaurant_id,
             func.date(Commande.created_at) == date.today(),
         ).count() >= quota:
+            db.commit()  # libère le lock
             return {"success": False, "recap_vocal":
                     "Désolée, nous avons atteint notre limite de commandes pour aujourd'hui. Réessayez demain !"}
 

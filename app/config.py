@@ -96,6 +96,25 @@ class Settings:
     # ⚠ Laisser vide en prod (RGPD : ces fichiers contiennent la voix du client).
     audio_debug_dir: str | None = _s("AUDIO_DEBUG_DIR")
 
+    # --- Observability (Sentry) ---
+    # DSN Sentry pour capturer les exceptions en production. Format :
+    # https://abc123@o12345.ingest.sentry.io/67890
+    # Si vide, Sentry est désactivé (no-op).
+    sentry_dsn: str | None = _s("SENTRY_DSN")
+
+    # --- Billing ---
+    # Coût estimé par minute d'appel (OpenAI Realtime + Telnyx voice + abonnement).
+    # 0.40 € est une estimation conservatrice — ajuster selon les vrais coûts mesurés.
+    billing_eur_per_minute: float = _f("BILLING_EUR_PER_MINUTE", 0.40)
+    # Seuil d'alerte (log + Sentry) quand un restaurant dépasse N €/mois.
+    billing_alert_eur: float = _f("BILLING_ALERT_EUR", 100.0)
+
+    # --- RGPD ---
+    # Durée de rétention des transcripts d'appel en jours. Au-delà, purge automatique
+    # via scripts/purge_old_calls.py (à exécuter en cron quotidien).
+    # 30 jours = recommandation CNIL pour des transcripts vocaux.
+    rgpd_call_log_retention_days: int = _i("RGPD_CALL_LOG_RETENTION_DAYS", 30)
+
     @property
     def stream_wss_domain(self) -> str | None:
         """Extrait le domaine pur (sans scheme) pour construire wss://<domaine>/voice/media-stream."""

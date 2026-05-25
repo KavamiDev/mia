@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Facturation — {{ restaurant.nom }}{% endblock %}
+{% block content %}
+<div class="mb-6">
+  {% if user.is_admin %}
+  <a href="/dashboard/billing" class="text-sm text-indigo-600 hover:underline">← Retour</a>
+  {% endif %}
+</div>
+
+<h2 class="text-2xl font-bold text-gray-900 mb-1">{{ restaurant.nom }}</h2>
+<p class="text-sm text-gray-500 mb-6">Consommation {{ summary.month }}/{{ summary.year }}</p>
+
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Appels reçus</div>
+    <div class="text-3xl font-bold text-gray-900">{{ summary.call_count }}</div>
+  </div>
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Minutes</div>
+    <div class="text-3xl font-bold text-gray-900">{{ summary.total_minutes }}</div>
+  </div>
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Coût estimé</div>
+    <div class="text-3xl font-bold text-indigo-700">{{ '%.2f' % summary.total_eur }} €</div>
+  </div>
+</div>
+
+<div class="bg-blue-50 border border-blue-200 rounded-xl p-4 text-xs text-blue-900">
+  <strong>ℹ Estimation indicative</strong> — basée sur la durée des appels × tarif unitaire configuré.
+  Ne remplace pas une facture officielle. Le tarif inclut OpenAI Realtime + Telnyx voice ;
+  les SMS (Telnyx + OVH) ne sont pas comptés ici.
+</div>
+{% endblock %}

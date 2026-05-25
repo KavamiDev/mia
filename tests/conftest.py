@@ -84,10 +84,13 @@ def _patch_session_local(new_session_local):
     Returns:
         Liste de (module, original) pour pouvoir restaurer après le test.
     """
+    from app import main as app_main
     from app.routers import voice_webhook
     from app.services import call_log_service, tool_service
+    from scripts import purge_old_calls
 
-    targets = [database, tool_service, voice_webhook, call_log_service]
+    targets = [database, tool_service, voice_webhook, call_log_service,
+               app_main, purge_old_calls]
     originals = []
     for mod in targets:
         if hasattr(mod, "SessionLocal"):

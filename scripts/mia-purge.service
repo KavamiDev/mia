@@ -1,0 +1,23 @@
+# Systemd timer + service pour purge RGPD quotidienne.
+# Installation :
+#   sudo cp scripts/mia-purge.service /etc/systemd/system/
+#   sudo cp scripts/mia-purge.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mia-purge.timer
+#
+# Vérifier :
+#   sudo systemctl list-timers mia-purge
+#   sudo journalctl -u mia-purge.service --since today
+
+[Unit]
+Description=MIA — Purge RGPD des transcripts d'appel
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=mia
+WorkingDirectory=/opt/mia
+EnvironmentFile=/opt/mia/.env
+ExecStart=/opt/mia/venv/bin/python -m scripts.purge_old_calls
+StandardOutput=journal
+StandardError=journal

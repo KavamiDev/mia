@@ -18,6 +18,7 @@ from typing import Any
 
 from app.database import SessionLocal
 from app.models import CallLog
+from app.services.billing_service import record_usage
 
 log = logging.getLogger("mia.calllog")
 
@@ -124,6 +125,15 @@ class CallTranscript:
             db.add(cl)
             db.commit()
             db.refresh(cl)
+
+            # Enregistre l'usage facturable (billing) — best effort.
+            # Si restaurant_id manquant (appel non routé), skip silencieusement.
+            if self.restaurant_id and duration > 0:
+                try:
+                    record_usage(db, self.restaurant_id, cl.id, duration)
+                except Exception as e:
+                    log.warning("record_usage échoué pour CallLog #%d : %s", cl.id, e)
+
             log.info("CallLog #%d flushé (%ds, %d échanges, %d tools)",
                      cl.id, duration, len(self.transcript), len(self.tool_calls))
             return cl.id

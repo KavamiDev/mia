@@ -83,6 +83,50 @@ class MenuItem(Base):
     restaurant = relationship("Restaurant", back_populates="menu_items")
 
 
+class User(Base):
+    """Utilisateur du dashboard admin (multi-tenant).
+
+    Un user appartient à UN restaurant (ou aucun s'il est admin global).
+    Le password est stocké en PBKDF2-SHA256 100k itérations (stdlib, pas de
+    dépendance externe — passlib/bcrypt ajouteraient ~5 MB pour 0 gain ici).
+
+    Format password_hash : `<salt_b64>$<hash_b64>`
+    """
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    password_hash = Column(String(255), nullable=False)
+    # restaurant_id NULL pour les admins globaux (voient tous les restos).
+    restaurant_id = Column(Integer, ForeignKey("restaurants.id", ondelete="CASCADE"),
+                           nullable=True, index=True)
+    is_admin = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    restaurant = relationship("Restaurant")
+
+
+class UsageLog(Base):
+    """Trace d'usage facturable par appel (billing + alerte seuil).
+
+    Une ligne par appel téléphonique : durée + coût estimé en EUR. Permet de
+    calculer rapidement la consommation mensuelle d'un restaurant et d'alerter
+    quand un seuil est dépassé.
+
+    cost_estimate_eur = duration_seconds × _COST_PER_SECOND_EUR (cf. billing_service)
+    """
+    __tablename__ = "usage_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    restaurant_id = Column(Integer, ForeignKey("restaurants.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    call_log_id = Column(Integer, ForeignKey("call_logs.id", ondelete="SET NULL"),
+                         nullable=True)
+    duration_seconds = Column(Integer, nullable=False, default=0)
+    cost_estimate_eur = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+
 class CallLog(Base):
     """Trace d'un appel téléphonique complet (transcript + tool calls).
 

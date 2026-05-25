@@ -121,13 +121,17 @@ def test_transcript_ignores_empty_text(db_session, sample_restaurant):
 
 
 def _login_dashboard(client):
-    """Connecte le client au dashboard et retourne les cookies de session."""
+    """Connecte le client comme admin et retourne les cookies de session.
+
+    Le superadmin admin@mia.local est créé automatiquement au startup si la
+    table users est vide (cf. app.main._bootstrap_admin_user).
+    """
     import os
     r = client.post("/dashboard/login",
-                    data={"password": os.environ["DASHBOARD_PASSWORD"]},
+                    data={"email": "admin@mia.local",
+                          "password": os.environ["DASHBOARD_PASSWORD"]},
                     follow_redirects=False)
-    # Login = 302 vers /dashboard/restaurants
-    assert r.status_code == 302
+    assert r.status_code == 302, f"Login failed: {r.status_code} {r.text[:300]}"
     return r.cookies
 
 

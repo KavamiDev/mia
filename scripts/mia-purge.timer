@@ -1,0 +1,10 @@
+[Unit]
+Description=Déclenche mia-purge.service tous les jours à 3h du matin
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
