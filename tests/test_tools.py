@@ -59,8 +59,87 @@ def test_create_reservation_success(sample_restaurant, db_session):
         assert result["code"].startswith("R")
         assert "4 personnes" in result["recap_vocal"]
         assert "20h30" in result["recap_vocal"]
-        # 2 SMS envoyés (resto + client)
+        # 2 SMS envoyés (resto + client) — defaults sms_to_*=True
         assert mock_sms.call_count == 2
+
+
+# ─────────────────────────────────────────
+# Toggle SMS (économie Brevo)
+# ─────────────────────────────────────────
+
+
+def test_reservation_no_sms_when_both_disabled(sample_restaurant, db_session):
+    """Toggles SMS off → AUCUN SMS envoyé mais résa créée."""
+    with patch.object(tool_service, "send_sms") as mock_sms:
+        result = execute_tool_call(
+            sample_restaurant.id, "create_reservation",
+            {"personnes": 2, "heure": "20h", "date": "2026-06-15"},
+            menu=[], quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco",
+            sms_to_client=False, sms_to_restaurant=False,
+        )
+        assert result["success"] is True
+        mock_sms.assert_not_called()
+        # Le récap vocal ne doit PAS mentionner le SMS
+        assert "SMS" not in result["recap_vocal"]
+
+
+def test_reservation_only_resto_sms(sample_restaurant, db_session):
+    """sms_to_client=False, sms_to_restaurant=True → 1 seul SMS (au resto)."""
+    with patch.object(tool_service, "send_sms") as mock_sms:
+        execute_tool_call(
+            sample_restaurant.id, "create_reservation",
+            {"personnes": 2, "heure": "20h", "date": "2026-06-15"},
+            menu=[], quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco",
+            sms_to_client=False, sms_to_restaurant=True,
+        )
+        assert mock_sms.call_count == 1
+        # Le destinataire doit être le resto, pas le client
+        assert mock_sms.call_args[0][0] == "+33612345678"
+
+
+def test_commande_short_sms_format(sample_restaurant, db_session):
+    """Les SMS commande sont compacts (< 160 chars = 1 SMS unique chez Brevo)."""
+    menu = [
+        {"nom_plat": "Pizza Margherita", "prix": 12.0, "description": ""},
+        {"nom_plat": "Pizza Reine", "prix": 14.0, "description": ""},
+        {"nom_plat": "Coca", "prix": 3.0, "description": ""},
+    ]
+    with patch.object(tool_service, "send_sms") as mock_sms:
+        execute_tool_call(
+            sample_restaurant.id, "create_commande",
+            {"items": [{"plat": "Pizza Margherita", "qty": 2},
+                       {"plat": "Pizza Reine", "qty": 1},
+                       {"plat": "Coca", "qty": 2}]},
+            menu=menu, quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco",
+        )
+        # 2 appels (resto + client)
+        assert mock_sms.call_count == 2
+        for call in mock_sms.call_args_list:
+            body = call[0][1]
+            assert len(body) <= 160, f"SMS trop long ({len(body)} chars) : {body!r}"
+
+
+def test_date_short_format_in_sms(sample_restaurant, db_session):
+    """Le SMS resto contient la date au format court 15/06 (pas 2026-06-15)."""
+    with patch.object(tool_service, "send_sms") as mock_sms:
+        execute_tool_call(
+            sample_restaurant.id, "create_reservation",
+            {"personnes": 4, "heure": "20h30", "date": "2026-06-15"},
+            menu=[], quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco",
+        )
+        # Vérifie qu'aucun SMS ne contient le format long ISO
+        for call in mock_sms.call_args_list:
+            body = call[0][1]
+            assert "2026-06-15" not in body, f"SMS contient format ISO long : {body!r}"
+            assert "15/06" in body, f"SMS devrait contenir 15/06 : {body!r}"
 
 
 def test_create_reservation_respects_quota(sample_restaurant, db_session):

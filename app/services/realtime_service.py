@@ -410,7 +410,9 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             quota_commandes=restaurant.get("quota_commandes"),
                             restaurant_phone=restaurant.get("telephone"),
                             caller_phone=caller_phone or None,
-                            restaurant_name=restaurant.get("nom", ""))
+                            restaurant_name=restaurant.get("nom", ""),
+                            sms_to_client=restaurant.get("sms_to_client", True),
+                            sms_to_restaurant=restaurant.get("sms_to_restaurant", True))
                         conv.info("[%s] ✓ Result : success=%s%s", cid, result.get("success"),
                                   f" code={result['code']}" if result.get("code") else "")
 

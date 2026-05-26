@@ -206,7 +206,10 @@ async def handle_media_stream(websocket: WebSocket):
         restaurant = {"id": r.id, "nom": r.nom, "telephone": r.telephone,
                       "horaires": r.horaires or "", "adresse": r.adresse or "",
                       "quota_reservations": r.quota_reservations,
-                      "quota_commandes": r.quota_commandes}
+                      "quota_commandes": r.quota_commandes,
+                      # Toggles SMS — défaut True pour rétro-compat
+                      "sms_to_client": r.sms_to_client if r.sms_to_client is not None else True,
+                      "sms_to_restaurant": r.sms_to_restaurant if r.sms_to_restaurant is not None else True}
         menu = [{"nom_plat": m.nom_plat, "prix": m.prix, "description": m.description or ""}
                 for m in db.query(MenuItem).filter(MenuItem.restaurant_id == rid).all()]
     finally:

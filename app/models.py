@@ -31,6 +31,11 @@ class Restaurant(Base):
     # Limites journalières. NULL = illimité.
     quota_reservations = Column(Integer, nullable=True)
     quota_commandes = Column(Integer, nullable=True)
+    # Toggles SMS — un SMS coûte ~0.05 € métropole, ~0.10 € Réunion (Brevo).
+    # Désactiver pour les restos qui consultent le dashboard et veulent éviter
+    # les frais SMS. Default True/True pour rétro-compat.
+    sms_to_client = Column(Boolean, nullable=False, default=True, server_default="true")
+    sms_to_restaurant = Column(Boolean, nullable=False, default=True, server_default="true")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     reservations = relationship("Reservation", back_populates="restaurant", cascade="all, delete-orphan")

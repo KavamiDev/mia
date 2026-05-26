@@ -56,6 +56,24 @@
       </div>
     </div>
 
+    <!-- Toggles SMS (économie : 0.045-0.10 €/SMS selon zone) -->
+    <fieldset class="border border-gray-200 rounded-lg p-4 space-y-2">
+      <legend class="text-sm font-medium text-gray-700 px-2">SMS de confirmation</legend>
+      <p class="text-xs text-gray-500 mb-2">Désactiver si le restaurateur consulte le dashboard. Réduit les coûts SMS (~0.10 €/SMS pour la Réunion).</p>
+      <label class="flex items-center text-sm text-gray-700">
+        <input type="checkbox" name="sms_to_restaurant" value="1"
+               {% if not restaurant or restaurant.sms_to_restaurant %}checked{% endif %}
+               class="rounded border-gray-300 text-indigo-600 mr-2">
+        Envoyer un SMS <strong>au restaurateur</strong> à chaque résa/commande
+      </label>
+      <label class="flex items-center text-sm text-gray-700">
+        <input type="checkbox" name="sms_to_client" value="1"
+               {% if not restaurant or restaurant.sms_to_client %}checked{% endif %}
+               class="rounded border-gray-300 text-indigo-600 mr-2">
+        Envoyer un SMS de confirmation <strong>au client</strong>
+      </label>
+    </fieldset>
+
     <div class="flex items-center gap-3 pt-2">
       <button type="submit"
               class="px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors">

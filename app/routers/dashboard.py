@@ -216,6 +216,7 @@ async def create_restaurant(
     adresse: str = Form(""), horaires: str = Form(""),
     incoming_phone_number: str = Form(""),
     quota_reservations: str = Form(""), quota_commandes: str = Form(""),
+    sms_to_client: str = Form("on"), sms_to_restaurant: str = Form("on"),
 ):
     user = _require_user(request, db)
     if isinstance(user, RedirectResponse):
@@ -229,6 +230,8 @@ async def create_restaurant(
         incoming_phone_number=incoming_phone_number.strip() or None,
         quota_reservations=_safe_int(quota_reservations),
         quota_commandes=_safe_int(quota_commandes),
+        sms_to_client=bool(sms_to_client),
+        sms_to_restaurant=bool(sms_to_restaurant),
     )
     db.add(r)
     db.commit()
@@ -258,6 +261,7 @@ async def update_restaurant(
     adresse: str = Form(""), horaires: str = Form(""),
     incoming_phone_number: str = Form(""),
     quota_reservations: str = Form(""), quota_commandes: str = Form(""),
+    sms_to_client: str = Form(""), sms_to_restaurant: str = Form(""),
 ):
     user = _require_user(request, db)
     if isinstance(user, RedirectResponse):
@@ -276,6 +280,9 @@ async def update_restaurant(
         r.incoming_phone_number = incoming_phone_number.strip() or None
     r.quota_reservations = _safe_int(quota_reservations)
     r.quota_commandes = _safe_int(quota_commandes)
+    # Checkboxes : présentes (non-empty string) = activé, absentes = désactivé.
+    r.sms_to_client = bool(sms_to_client)
+    r.sms_to_restaurant = bool(sms_to_restaurant)
     db.commit()
     return templates.TemplateResponse("restaurant_form.html", {
         "request": request, "restaurant": r, "active": "restaurants",

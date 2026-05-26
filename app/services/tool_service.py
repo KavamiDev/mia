@@ -4,11 +4,17 @@ Quand MIA décide d'agir (créer une réservation, une commande, ou transférer
 l'appel), OpenAI Realtime émet un `function_call` que ce module traite.
 
 Flux pour réservation/commande :
-  1. Validation des arguments + vérification du quota journalier
+  1. Validation des arguments + vérification atomique du quota (SELECT FOR UPDATE)
   2. Génération d'un code court unique (ex: R4T2K)
   3. Persistance en base PostgreSQL
-  4. Envoi de 2 SMS : un au restaurateur (détails), un au client (confirmation)
+  4. Envoi de SMS (selon toggles restaurant) : resto + client
   5. Retour d'un récapitulatif vocal que MIA lit à l'appelant
+
+Économie SMS :
+  Brevo facture ~0.045 €/SMS métropole, ~0.10 €/SMS Réunion. Les templates
+  ci-dessous sont courts pour rester sous 160 chars (= 1 SMS unique, pas
+  multi-part). Les toggles Restaurant.sms_to_* permettent de désactiver
+  les envois si le resto consulte le dashboard.
 """
 import logging
 import secrets
@@ -28,54 +34,59 @@ _CODE_CHARS = "234679ACDEFGHJKMNPQRTUVWXYZ"
 
 
 def _code(prefix: str) -> str:
-    """Génère un code court cryptographiquement sûr (ex: R4T2K, C7MN9).
-
-    `secrets` est utilisé plutôt que `random` car ces codes servent
-    d'identifiants exposés au client : un code prévisible pourrait
-    permettre de deviner les réservations d'autres clients.
-    """
+    """Génère un code court cryptographiquement sûr (ex: R4T2K, C7MN9)."""
     return prefix + "".join(secrets.choice(_CODE_CHARS) for _ in range(4))
 
 
 def _spell(code: str) -> str:
-    """Espace chaque caractère pour que MIA épelle le code lisiblement
-    (« R 4 T 2 K » au lieu de « R4T2K » prononcé d'un bloc)."""
+    """Espace chaque caractère pour épeler le code à l'oral."""
     return " ".join(code)
 
 
+def _short_date(date_iso: str) -> str:
+    """Convertit '2026-06-15' → '15/06'. Si parsing échoue, retourne tel quel.
+
+    Format court utilisé dans les SMS pour économiser des caractères.
+    """
+    if not date_iso or "-" not in date_iso:
+        return date_iso or ""
+    parts = date_iso.split("-")
+    if len(parts) >= 3:
+        # AAAA-MM-JJ → JJ/MM
+        return f"{parts[2].lstrip('0').zfill(2)}/{parts[1]}"
+    return date_iso
+
+
 def execute_tool_call(restaurant_id: int, name: str, args: dict, *, menu, quota_reservations,
-                      quota_commandes, restaurant_phone, caller_phone, restaurant_name) -> dict:
+                      quota_commandes, restaurant_phone, caller_phone, restaurant_name,
+                      sms_to_client: bool = True, sms_to_restaurant: bool = True) -> dict:
     """Point d'entrée unique appelé par realtime_service quand OpenAI émet un function_call.
 
-    Le téléphone du client est injecté ici depuis caller_phone (récupéré via
-    Telnyx) — MIA ne le demande JAMAIS à l'oral (cf. prompt système).
-
-    Retourne un dict avec :
-      - success: bool
-      - recap_vocal: phrase que MIA lira au client
-      - transfer: True si on doit transférer l'appel (transfer_to_human)
+    Args:
+        sms_to_client : envoyer un SMS au client (default True, configurable par resto)
+        sms_to_restaurant : envoyer un SMS au resto (default True, configurable)
     """
     tel = caller_phone or ""
     if name == "create_reservation":
-        return _create_reservation(restaurant_id, args, tel, quota_reservations, restaurant_phone, restaurant_name)
+        return _create_reservation(restaurant_id, args, tel, quota_reservations,
+                                   restaurant_phone, restaurant_name,
+                                   sms_to_client, sms_to_restaurant)
     if name == "create_commande":
-        return _create_commande(restaurant_id, args, tel, menu or [], quota_commandes, restaurant_phone, restaurant_name)
+        return _create_commande(restaurant_id, args, tel, menu or [], quota_commandes,
+                                restaurant_phone, restaurant_name,
+                                sms_to_client, sms_to_restaurant)
     if name == "transfer_to_human":
         return _transfer(args, restaurant_name)
     return {"success": False, "error": f"Fonction inconnue : {name}"}
 
 
-def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, restaurant_name) -> dict:
+def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, restaurant_name,
+                        sms_to_client=True, sms_to_restaurant=True) -> dict:
     """Crée une réservation après vérification atomique du quota journalier.
 
     Pour éviter la race condition (2 appels en // qui voient le quota non
     atteint et insèrent tous les deux), on lock la ligne du restaurant via
     SELECT ... FOR UPDATE le temps du check+insert.
-
-    Postgres : lock granulaire sur la ligne, les autres transactions sur le
-              même restaurant attendent. Pas de deadlock car un seul resto/req.
-    SQLite   : FOR UPDATE est silencieusement ignoré, mais SQLite a un lock
-              global writer de toute façon, donc l'atomicité reste garantie.
     """
     date_req = str(args.get("date", ""))                # Format AAAA-MM-JJ
     personnes = max(int(args.get("personnes", 1)), 1)   # Au moins 1 personne
@@ -84,15 +95,12 @@ def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, resta
 
     db = SessionLocal()
     try:
-        # ⚠ Lock atomique du restaurant le temps de la transaction.
-        # Sans ce lock, 2 requêtes concurrentes pourraient toutes deux voir
-        # count() < quota et insérer toutes les deux → quota dépassé.
         db.query(Restaurant).filter(Restaurant.id == restaurant_id).with_for_update().first()
 
         if quota and db.query(Reservation).filter(
             Reservation.restaurant_id == restaurant_id, Reservation.date == date_req
         ).count() >= quota:
-            db.commit()  # libère le lock même si on return
+            db.commit()
             return {"success": False, "recap_vocal":
                     "Désolée, plus de table disponible pour cette date. Je peux vous proposer un autre jour ?"}
 
@@ -106,53 +114,51 @@ def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, resta
     finally:
         db.close()
 
-    # SMS au restaurateur (détails opérationnels) puis au client (confirmation).
-    # Les échecs SMS sont silencieux côté send_sms — ne bloquent pas la résa.
-    if restaurant_phone:
-        send_sms(restaurant_phone,
-                 f"Réservation {code}\n{personnes} personnes\n{heure} le {date_req}\nTel : {tel}")
-    if tel:
-        resto = f" chez {restaurant_name}" if restaurant_name else ""
-        send_sms(tel,
-                 f"Réservation {code} confirmée{resto}\n{personnes} pers. le {date_req} à {heure}\nÀ bientôt !")
+    # ─── SMS courts (économie : 1 SMS unique sous 160 chars) ───
+    # Format date 15/06 au lieu de 2026-06-15, "Résa" au lieu de "Réservation".
+    d = _short_date(date_req)
+    if sms_to_restaurant and restaurant_phone:
+        # Resto : code + personnes + date + heure + tel client (pour rappel possible)
+        # Ex: "Résa R4T2K: 4p le 15/06 20h30. Tel +33692123456" → ~52 chars
+        send_sms(restaurant_phone, f"Résa {code}: {personnes}p le {d} {heure}. Tel {tel}")
+    if sms_to_client and tel:
+        # Client : minimal — code + récap (le restaurant_name est dans le sender MIA)
+        # Ex: "Resa R4T2K OK: 4p le 15/06 20h30" → ~33 chars
+        send_sms(tel, f"Resa {code} OK: {personnes}p le {d} {heure}")
 
-    log.info("Réservation créée : %s (%d pers. le %s à %s)", code, personnes, date_req, heure)
+    log.info("Réservation créée : %s (%d pers. le %s à %s) sms_resto=%s sms_client=%s",
+             code, personnes, date_req, heure,
+             sms_to_restaurant and bool(restaurant_phone),
+             sms_to_client and bool(tel))
 
-    # Extrait le jour de la date ISO pour un récap vocal plus naturel
-    # ("le 5 à 20h" plutôt que "le 2026-05-05 à 20h").
     jour = date_req.split("-")[-1].lstrip("0") if "-" in date_req else date_req
+    # Le récap vocal mentionne le SMS uniquement si on en envoie un
+    sms_msg = " Vous allez recevoir un SMS." if (sms_to_client and tel) else ""
     return {"success": True, "code": code, "recap_vocal":
             f"Parfait ! Votre réservation {_spell(code)} est confirmée. "
-            f"{personnes} personne{'s' if personnes > 1 else ''}, le {jour} à {heure}. "
-            f"Vous allez recevoir un SMS. À bientôt !"}
+            f"{personnes} personne{'s' if personnes > 1 else ''}, le {jour} à {heure}."
+            f"{sms_msg} À bientôt !"}
 
 
-def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, restaurant_name) -> dict:
+def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, restaurant_name,
+                     sms_to_client=True, sms_to_restaurant=True) -> dict:
     """Crée une commande à emporter après calcul du total via le menu."""
     code = _code("C")
-    # Index du menu pour résoudre rapidement le prix de chaque plat.
-    # Match insensible à la casse pour tolérer les variantes de transcription
-    # (ex: "Pizza Reine" vs "pizza reine").
     prices = {m["nom_plat"].strip().lower(): float(m.get("prix", 0))
               for m in menu if m.get("nom_plat")}
 
     db = SessionLocal()
     try:
-        # ⚠ Lock atomique restaurant pour éviter les races concurrentes
-        # (même pattern que _create_reservation, cf. doc là-bas).
         db.query(Restaurant).filter(Restaurant.id == restaurant_id).with_for_update().first()
 
-        # Quota basé sur created_at (date du jour côté serveur, pas date demandée).
         if quota and db.query(Commande).filter(
             Commande.restaurant_id == restaurant_id,
             func.date(Commande.created_at) == date.today(),
         ).count() >= quota:
-            db.commit()  # libère le lock
+            db.commit()
             return {"success": False, "recap_vocal":
                     "Désolée, nous avons atteint notre limite de commandes pour aujourd'hui. Réessayez demain !"}
 
-        # Résolution des items : on garde le prix unitaire trouvé (0 si plat inconnu).
-        # MIA est censée ne proposer que les plats du menu (cf. prompt système).
         resolved, total = [], 0.0
         for it in args.get("items", []):
             plat = str(it.get("plat", "")).strip()
@@ -171,20 +177,30 @@ def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, re
     finally:
         db.close()
 
-    # Récap textuel "2 Pizza Reine, 1 Coca" pour le SMS et la voix.
-    recap = ", ".join(f"{i['qty']} {i['plat']}" for i in resolved)
-    if restaurant_phone:
-        send_sms(restaurant_phone,
-                 f"Commande {code}\n{recap}\nTotal : {total:.2f}€\nTel : {tel}")
-    if tel:
-        resto = f" chez {restaurant_name}" if restaurant_name else ""
-        send_sms(tel,
-                 f"Commande {code} confirmée{resto}\n{recap}\nTotal : {total:.2f}€\nÀ récupérer au restaurant !")
+    # ─── SMS courts ───
+    # Format compact items : "2x Pizza, 1x Coca" (vs "2 Pizza Margherita, 1 Coca")
+    recap_short = ", ".join(f"{i['qty']}x {i['plat']}" for i in resolved)
+    recap_full = ", ".join(f"{i['qty']} {i['plat']}" for i in resolved)
 
-    log.info("Commande créée : %s (%.2f€, %d items)", code, total, len(resolved))
+    if sms_to_restaurant and restaurant_phone:
+        # Resto : code + items + total + tel client
+        # Ex: "Cmd C7XYZ: 2x Pizza Reine, 1x Coca. 31€. Tel +33692123456" → ~63 chars
+        send_sms(restaurant_phone,
+                 f"Cmd {code}: {recap_short}. {total:.0f}€. Tel {tel}")
+    if sms_to_client and tel:
+        # Client : code + total uniquement (le détail est dans le récap vocal)
+        # Ex: "Cmd C7XYZ OK: 31€. À récupérer au resto." → ~40 chars
+        send_sms(tel, f"Cmd {code} OK: {total:.0f}€. À récupérer au resto.")
+
+    log.info("Commande créée : %s (%.2f€, %d items) sms_resto=%s sms_client=%s",
+             code, total, len(resolved),
+             sms_to_restaurant and bool(restaurant_phone),
+             sms_to_client and bool(tel))
+
+    sms_msg = " Vous allez recevoir un SMS." if (sms_to_client and tel) else ""
     return {"success": True, "code": code, "recap_vocal":
-            f"Parfait ! Votre commande {_spell(code)} est enregistrée : {recap}. "
-            f"Total : {total:.2f} euros. Vous allez recevoir un SMS. À tout à l'heure !"}
+            f"Parfait ! Votre commande {_spell(code)} est enregistrée : {recap_full}. "
+            f"Total : {total:.2f} euros.{sms_msg} À tout à l'heure !"}
 
 
 def _transfer(args, restaurant_name) -> dict:
