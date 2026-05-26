@@ -30,6 +30,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -234,7 +235,23 @@ async def create_restaurant(
         sms_to_restaurant=bool(sms_to_restaurant),
     )
     db.add(r)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        # Conflit le plus courant : incoming_phone_number déjà pris par un autre resto.
+        msg = _friendly_integrity_error(str(e.orig))
+        return templates.TemplateResponse("restaurant_form.html", {
+            "request": request, "restaurant": None, "active": "restaurants",
+            "user": user, "flash": msg, "flash_type": "error",
+            # Re-fill du form pour ne pas perdre les saisies
+            "form_values": {
+                "nom": nom, "telephone": telephone, "adresse": adresse,
+                "horaires": horaires, "incoming_phone_number": incoming_phone_number,
+                "quota_reservations": quota_reservations,
+                "quota_commandes": quota_commandes,
+            },
+        })
     return RedirectResponse(f"/dashboard/restaurants/{r.id}", status_code=302)
 
 
@@ -283,7 +300,16 @@ async def update_restaurant(
     # Checkboxes : présentes (non-empty string) = activé, absentes = désactivé.
     r.sms_to_client = bool(sms_to_client)
     r.sms_to_restaurant = bool(sms_to_restaurant)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        db.refresh(r)
+        return templates.TemplateResponse("restaurant_form.html", {
+            "request": request, "restaurant": r, "active": "restaurants",
+            "user": user, "flash": _friendly_integrity_error(str(e.orig)),
+            "flash_type": "error",
+        })
     return templates.TemplateResponse("restaurant_form.html", {
         "request": request, "restaurant": r, "active": "restaurants",
         "user": user, "flash": "Restaurant mis à jour", "flash_type": "success",
@@ -595,3 +621,20 @@ def _safe_int(value: str) -> int | None:
         return v if v > 0 else None
     except (ValueError, AttributeError):
         return None
+
+
+def _friendly_integrity_error(msg: str) -> str:
+    """Traduit un message IntegrityError postgres en français pour l'utilisateur.
+
+    Exemples couverts :
+      - violation contrainte unique sur incoming_phone_number (cas le plus fréquent)
+      - violation contrainte unique sur email (table users)
+      - autre : message générique
+    """
+    low = msg.lower()
+    if "incoming_phone_number" in low:
+        return ("Ce numéro Telnyx est déjà utilisé par un autre restaurant. "
+                "Un seul restaurant peut être lié à un numéro à la fois.")
+    if "users_email_key" in low or '"users"' in low:
+        return "Cet email est déjà utilisé par un autre utilisateur."
+    return "Conflit de données : impossible d'enregistrer. Vérifiez les champs uniques."

@@ -135,6 +135,25 @@ def _login_dashboard(client):
     return r.cookies
 
 
+def test_create_restaurant_duplicate_phone_returns_form_with_error(client, db_session):
+    """POST /restaurants/new avec un incoming_phone_number déjà pris →
+    pas de 500, mais form ré-affiché avec un flash d'erreur clair."""
+    from app.models import Restaurant
+    db_session.add(Restaurant(nom="Existing", telephone="+33611111111",
+                              incoming_phone_number="+33644645590"))
+    db_session.commit()
+
+    cookies = _login_dashboard(client)
+    r = client.post("/dashboard/restaurants/new", cookies=cookies, follow_redirects=False,
+                    data={"nom": "Doublon", "telephone": "+33622222222",
+                          "incoming_phone_number": "+33644645590",
+                          "quota_reservations": "", "quota_commandes": "",
+                          "sms_to_client": "on", "sms_to_restaurant": "on"})
+    # Pas de 500 : on rend le form avec le message
+    assert r.status_code == 200
+    assert "déjà utilisé" in r.text or "Conflit" in r.text
+
+
 def test_calls_page_requires_login(client):
     """Sans cookie → redirect vers login."""
     r = client.get("/dashboard/calls", follow_redirects=False)
