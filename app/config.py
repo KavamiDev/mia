@@ -75,6 +75,12 @@ class Settings:
 
     # --- Voix OpenAI Realtime ---
     voice_realtime_voice: str = _s("VOICE_REALTIME_VOICE", "coral")
+    # Modèle Realtime. OpenAI renomme régulièrement, d'où la variable :
+    #   - "gpt-realtime"       → alias vers la dernière version stable (recommandé)
+    #   - "gpt-realtime-mini"  → ~50 % moins cher, qualité légèrement inférieure
+    #   - "gpt-realtime-2"     → version explicite (immuable)
+    # Si OpenAI sort un nouveau modèle, on ajuste l'env sans toucher au code.
+    openai_realtime_model: str = _s("OPENAI_REALTIME_MODEL", "gpt-realtime")
     # VAD = Voice Activity Detection. Contrôle quand OpenAI considère
     # que l'utilisateur a fini de parler et déclenche une réponse.
     #

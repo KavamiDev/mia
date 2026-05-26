@@ -137,7 +137,7 @@ async def _init_session(openai_ws, instructions: str, transcription_prompt: str 
         transcription_cfg["prompt"] = transcription_prompt
 
     await openai_ws.send(json.dumps({"type": "session.update", "session": {
-        "type": "realtime", "model": "gpt-4o-realtime-preview",
+        "type": "realtime", "model": settings.openai_realtime_model,
         "output_modalities": ["audio"], "instructions": instructions,
         "audio": {
             "input": {
@@ -191,7 +191,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
     log.info("[%s] Connexion OpenAI Realtime...", cid)
 
     async with websockets.connect(
-        "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
+        f"wss://api.openai.com/v1/realtime?model={settings.openai_realtime_model}",
         additional_headers={"Authorization": f"Bearer {settings.openai_api_key}"},
         ssl=ssl_ctx,
     ) as openai_ws:
