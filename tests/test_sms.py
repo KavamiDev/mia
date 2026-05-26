@@ -1,12 +1,11 @@
 """Tests du service SMS multi-provider.
 
 On vérifie :
-  1. Le routage automatique (+262 → OVH, autres → Telnyx)
-  2. La signature HMAC-SHA1 OVH
+  1. Le routage automatique (+262 → Brevo, autres → Telnyx)
+  2. L'auth Brevo (header api-key, body JSON)
   3. Le fallback silencieux (config manquante, erreur HTTP)
   4. Le masquage des numéros dans les logs (RGPD)
 """
-import hashlib
 import json
 from io import BytesIO
 from unittest.mock import MagicMock, patch
@@ -35,43 +34,43 @@ def _mock_http_response(body: dict, status: int = 200):
 # ─────────────────────────────────────────
 
 
-def test_route_reunion_to_ovh():
-    """Numéro +262 → _send_via_ovh."""
-    with patch.object(sms_service, "_send_via_ovh", return_value=True) as ovh, \
+def test_route_reunion_to_brevo():
+    """Numéro +262 → _send_via_brevo."""
+    with patch.object(sms_service, "_send_via_brevo", return_value=True) as brevo, \
          patch.object(sms_service, "_send_via_telnyx", return_value=True) as telnyx:
         result = sms_service.send_sms("+262692123456", "Test")
         assert result is True
-        ovh.assert_called_once()
+        brevo.assert_called_once()
         telnyx.assert_not_called()
 
 
-def test_route_local_reunion_to_ovh():
-    """0692123456 (notation locale Réunion) → routé en +262 puis vers OVH."""
-    with patch.object(sms_service, "_send_via_ovh", return_value=True) as ovh, \
+def test_route_local_reunion_to_brevo():
+    """0692123456 (notation locale Réunion) → routé en +262 puis vers Brevo."""
+    with patch.object(sms_service, "_send_via_brevo", return_value=True) as brevo, \
          patch.object(sms_service, "_send_via_telnyx", return_value=True) as telnyx:
         sms_service.send_sms("0692123456", "Test")
-        ovh.assert_called_once()
-        # Vérifie que c'est bien le E.164 +262 qui est passé à OVH
-        assert ovh.call_args[0][0] == "+262692123456"
+        brevo.assert_called_once()
+        # Vérifie que c'est bien le E.164 +262 qui est passé à Brevo
+        assert brevo.call_args[0][0] == "+262692123456"
         telnyx.assert_not_called()
 
 
 def test_route_metropole_to_telnyx():
     """0612345678 → +33... → Telnyx."""
-    with patch.object(sms_service, "_send_via_ovh", return_value=True) as ovh, \
+    with patch.object(sms_service, "_send_via_brevo", return_value=True) as brevo, \
          patch.object(sms_service, "_send_via_telnyx", return_value=True) as telnyx:
         sms_service.send_sms("0612345678", "Test")
         telnyx.assert_called_once()
-        ovh.assert_not_called()
+        brevo.assert_not_called()
 
 
 def test_invalid_number_returns_false():
     """Numéro invalide → False sans appel HTTP."""
-    with patch.object(sms_service, "_send_via_ovh") as ovh, \
+    with patch.object(sms_service, "_send_via_brevo") as brevo, \
          patch.object(sms_service, "_send_via_telnyx") as telnyx:
         assert sms_service.send_sms("", "msg") is False
         assert sms_service.send_sms(None, "msg") is False
-        ovh.assert_not_called()
+        brevo.assert_not_called()
         telnyx.assert_not_called()
 
 
@@ -116,94 +115,70 @@ def test_telnyx_network_error_silent():
 
 
 # ─────────────────────────────────────────
-# Provider OVH
+# Provider Brevo
 # ─────────────────────────────────────────
 
 
-def test_ovh_signature_format():
-    """La signature OVH suit le format documenté : '$1$' + sha1_hex(...)."""
-    sig = sms_service._ovh_sign(
-        method="POST",
-        url="https://eu.api.ovh.com/1.0/sms/test/jobs",
-        body='{"a":1}',
-        timestamp="1700000000",
-        app_secret="my_secret",
-        consumer_key="my_consumer",
-    )
-    expected_input = "my_secret+my_consumer+POST+https://eu.api.ovh.com/1.0/sms/test/jobs+{\"a\":1}+1700000000"
-    expected = "$1$" + hashlib.sha1(expected_input.encode()).hexdigest()
-    assert sig == expected
-    assert sig.startswith("$1$")
-    assert len(sig) == 3 + 40  # "$1$" + 40 hex chars de sha1
-
-
-def test_ovh_success():
-    """OVH retourne validReceivers → True."""
+def test_brevo_success():
+    """Brevo retourne messageId → True + headers + body corrects."""
     fake_resp = _mock_http_response({
-        "ids": [12345],
-        "validReceivers": ["+262692123456"],
-        "invalidReceivers": [],
+        "reference": "MIA-001",
+        "messageId": 281474976710655,
+        "smsCount": 1,
+        "usedCredits": 0.045,
+        "remainingCredits": 95.5,
     })
     with patch("urllib.request.urlopen", return_value=fake_resp) as urlopen:
-        result = sms_service._send_via_ovh("+262692123456", "Bonjour")
+        result = sms_service._send_via_brevo("+262692123456", "Bonjour")
         assert result is True
-        # urllib.request.Request normalise les headers via str.capitalize()
-        # → "X-Ovh-Application" devient "X-ovh-application" dans req.headers.
+
         req = urlopen.call_args[0][0]
+        # Brevo utilise un header api-key (pas Authorization Bearer)
         normalized = {k.lower(): v for k, v in req.headers.items()}
-        assert "x-ovh-application" in normalized
-        assert "x-ovh-consumer" in normalized
-        assert "x-ovh-signature" in normalized
-        assert "x-ovh-timestamp" in normalized
-        # La signature doit commencer par "$1$" suivi du sha1 hex (40 chars)
-        assert normalized["x-ovh-signature"].startswith("$1$")
-        # Vérifie URL
-        assert "/sms/sms-test-1/jobs" in req.full_url
-        # Vérifie body
+        assert "api-key" in normalized
+        assert normalized["api-key"] == "xkeysib-test-key"
+        # Endpoint
+        assert "api.brevo.com" in req.full_url
+        assert "/transactionalSMS/sms" in req.full_url
+        # Body
         body = json.loads(req.data.decode())
-        assert body["receivers"] == ["+262692123456"]
+        assert body["recipient"] == "+262692123456"
+        assert body["content"] == "Bonjour"
         assert body["sender"] == "MIA"
-        assert body["noStopClause"] is True
+        assert body["type"] == "transactional"
 
 
-def test_ovh_invalid_receiver():
-    """OVH met le numéro dans invalidReceivers → False."""
-    fake_resp = _mock_http_response({
-        "ids": [],
-        "validReceivers": [],
-        "invalidReceivers": ["+262692123456"],
-    })
-    with patch("urllib.request.urlopen", return_value=fake_resp):
-        result = sms_service._send_via_ovh("+262692123456", "Test")
-        assert result is False
-
-
-def test_ovh_missing_config_silent_fail():
-    """Si une seule des 4 clés OVH manque → False sans appel HTTP."""
+def test_brevo_missing_api_key_silent_fail():
+    """Si BREVO_API_KEY vide → False sans appel HTTP."""
     from app import config
-    original = config.settings.ovh_application_key
-    # On patche directement le settings (dataclass frozen → object.__setattr__)
-    object.__setattr__(config.settings, "ovh_application_key", "")
+    original = config.settings.brevo_api_key
+    object.__setattr__(config.settings, "brevo_api_key", "")
     try:
         with patch("urllib.request.urlopen") as urlopen:
-            result = sms_service._send_via_ovh("+262692123456", "Test")
+            result = sms_service._send_via_brevo("+262692123456", "Test")
             assert result is False
             urlopen.assert_not_called()
     finally:
-        object.__setattr__(config.settings, "ovh_application_key", original)
+        object.__setattr__(config.settings, "brevo_api_key", original)
 
 
-def test_ovh_http_error_silent():
-    """Erreur 403 OVH (auth/quota) → False, log warning, pas de crash."""
+def test_brevo_http_error_silent():
+    """Erreur 4xx Brevo (sender non validé, crédits épuisés...) → False, pas de crash."""
     err = HTTPError(
-        url="https://eu.api.ovh.com/1.0/sms/foo/jobs",
-        code=403,
-        msg="Forbidden",
+        url="https://api.brevo.com/v3/transactionalSMS/sms",
+        code=400,
+        msg="Bad Request",
         hdrs={},
-        fp=BytesIO(b'{"message": "This service does not exist"}'),
+        fp=BytesIO(b'{"code": "invalid_parameter", "message": "Invalid sender"}'),
     )
     with patch("urllib.request.urlopen", side_effect=err):
-        assert sms_service._send_via_ovh("+262692123456", "Test") is False
+        assert sms_service._send_via_brevo("+262692123456", "Test") is False
+
+
+def test_brevo_network_error_silent():
+    """Timeout / réseau Brevo → False, pas d'exception."""
+    with patch("urllib.request.urlopen", side_effect=TimeoutError("timeout")):
+        assert sms_service._send_via_brevo("+262692123456", "Test") is False
 
 
 # ─────────────────────────────────────────

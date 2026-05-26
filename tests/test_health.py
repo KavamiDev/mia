@@ -25,11 +25,11 @@ def test_health_includes_api_keys_status(client):
     assert "telnyx_key" in data["checks"]
 
 
-def test_health_ovh_status(client):
-    """Les 4 clés OVH étant définies en test → ok."""
+def test_health_brevo_status(client):
+    """BREVO_API_KEY défini en test → brevo_sms = ok."""
     r = client.get("/health")
     data = r.json()
-    assert data["checks"]["ovh_sms"] in ("ok", "partial", "not_configured")
+    assert data["checks"]["brevo_sms"] in ("ok", "not_configured")
 
 
 def test_health_no_auth_required(client):

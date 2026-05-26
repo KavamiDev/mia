@@ -25,11 +25,9 @@ os.environ.setdefault("DASHBOARD_SECRET", "test-secret-32-bytes-minimum-for-hmac
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-fake")
 os.environ.setdefault("TELNYX_API_KEY", "KEY_TEST_FAKE")
 os.environ.setdefault("TELNYX_PHONE_NUMBER", "+33612345678")
-# OVH SMS : config complète bidon pour pouvoir tester le routage.
-os.environ.setdefault("OVH_APPLICATION_KEY", "ovh-app-key-test")
-os.environ.setdefault("OVH_APPLICATION_SECRET", "ovh-app-secret-test")
-os.environ.setdefault("OVH_CONSUMER_KEY", "ovh-consumer-key-test")
-os.environ.setdefault("OVH_SMS_ACCOUNT", "sms-test-1")
+# Brevo SMS : clé bidon pour les tests (les vrais appels HTTP sont mockés).
+os.environ.setdefault("BREVO_API_KEY", "xkeysib-test-key")
+os.environ.setdefault("BREVO_SENDER", "MIA")
 os.environ.setdefault("BACKEND_URL", "http://localhost:8000")
 
 # ───── 2. Patch JSONB → JSON pour SQLite ─────

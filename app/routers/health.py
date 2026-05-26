@@ -50,15 +50,8 @@ async def health(db: Session = Depends(get_db)):
         checks["telnyx_pubkey"] = "ok" if settings.telnyx_public_key else "missing"
         checks["sentry"] = "ok" if settings.sentry_dsn else "missing"
 
-    # 4. OVH SMS (optionnel — info uniquement)
-    ovh_keys = [settings.ovh_application_key, settings.ovh_application_secret,
-                settings.ovh_consumer_key, settings.ovh_sms_account]
-    if all(ovh_keys):
-        checks["ovh_sms"] = "ok"
-    elif any(ovh_keys):
-        checks["ovh_sms"] = "partial"
-    else:
-        checks["ovh_sms"] = "not_configured"
+    # 4. Brevo SMS (fallback +262 — optionnel)
+    checks["brevo_sms"] = "ok" if settings.brevo_api_key else "not_configured"
 
     # Status global : down si DB ou vars critiques KO, degraded si secret par défaut.
     critical_keys = ["db", "openai_key", "telnyx_key"]
