@@ -14,7 +14,7 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 # Imports app : doivent être après l'init pour récupérer la config.
 from app import models  # noqa: F401  — peuple Base.metadata
@@ -23,19 +23,22 @@ from app.database import Base
 
 config = context.config
 
-# Override le sqlalchemy.url de alembic.ini avec la conf de l'app.
-config.set_main_option("sqlalchemy.url", app_settings.database_url)
-
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
 
+# ⚠ On NE passe PAS par config.set_main_option("sqlalchemy.url", ...) car
+# configparser interprète les `%` dans l'URL comme syntaxe d'interpolation.
+# Un password postgres contenant `@` (encodé `%40`) fait planter alembic.
+# Solution : on utilise directement app_settings.database_url plus bas.
+_DB_URL = app_settings.database_url
+
 
 def run_migrations_offline() -> None:
     """Génère le SQL sans connexion (alembic upgrade --sql)."""
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=_DB_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -47,11 +50,9 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Mode normal : applique les migrations sur la DB connectée."""
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    # create_engine direct sur l'URL (pas via engine_from_config qui passerait
+    # par configparser → bug interpolation sur le `%` du password).
+    connectable = create_engine(_DB_URL, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
