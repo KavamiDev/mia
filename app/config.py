@@ -92,12 +92,18 @@ class Settings:
     #
     # Calibration latence (goal : <1.5 s perçue) :
     #   silence_duration_ms + inference OpenAI (~400ms) + réseau (~150ms) = latence totale
-    #   À 700ms → ~1.25s perçue. Acceptable pour téléphone.
-    #   À 1500ms → ~2.05s, perçu comme "long" par l'appelant.
-    # Si MIA coupe trop tôt en cours de phrase, monter à 900-1100ms.
-    vad_threshold: float = _f("VAD_THRESHOLD", 0.6)              # 0..1, sensibilité (compromis téléphonique/bruit)
-    vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 300) # Court → meilleure réactivité
-    vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 700)   # Silence min — calibré pour ~1.25s latence
+    #   À 900ms → ~1.45s perçue. Compromis : capture les mots courts (« oui »)
+    #   sans trop allonger la latence.
+    #
+    # threshold=0.5 (au lieu de 0.6) : plus sensible aux sons faibles
+    #   (« hummm », « oui » courts, voix Réunion compressée GSM).
+    #   À 0.6, on observait des « oui » non détectés après le récap → résa bloquée.
+    #
+    # silence_duration_ms=900 (au lieu de 700) : laisse le temps aux mots
+    #   isolés comme « oui » d'être pleinement bufferisés avant déclenchement.
+    vad_threshold: float = _f("VAD_THRESHOLD", 0.5)              # 0..1, sensibilité (compromis téléphonique/bruit)
+    vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 400) # Capture mieux le DÉBUT du mot
+    vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 900)   # Silence min — laisse les "oui" courts être captés
 
     # --- Debug audio (optionnel) ---
     # Si défini, dump les 5 premières secondes d'audio entrant de chaque appel
