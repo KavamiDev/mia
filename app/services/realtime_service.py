@@ -175,13 +175,16 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
     menu = menu or []
     instructions = _build_instructions(restaurant, menu, caller_phone)
 
-    # ⚠ PAS de bias prompt avec les noms de plats : observé en prod, le modèle
-    # remplaçait des phrases entières par des noms de plats (« 4 personnes
-    # demain à 20h » → « Pizza Végétarienne »). On laisse la transcription
-    # FR native faire son travail. Si besoin, on peut ajouter un prompt
-    # COURT (< 200 chars) avec uniquement du vocabulaire générique.
+    # Bias prompt COURT et GÉNÉRIQUE — aide la transcription sur audio 8kHz GSM
+    # sans la polluer. Pas de noms de plats (cause d'hallucinations « Pizza
+    # Végétarienne » au lieu de « 4 personnes »). Juste les structures qu'un
+    # client énonce typiquement : chiffres, heures, dates.
     nom = restaurant.get("nom", "le restaurant")
-    transcription_prompt = ""  # désactivé — cf. doc dans _init_session
+    transcription_prompt = (
+        "Conversation téléphonique restaurant en français. "
+        "Le client peut énoncer : un nombre de personnes (2, 4, 6, 8), "
+        "une heure (12h, 19h30, 20h), une date (demain, vendredi, le 15)."
+    )
 
     # Greeting : éviter "chez Chez Marco" si le nom commence déjà par "Chez/Au/Le/La".
     nom_prefixe = nom.lower().split(" ", 1)[0] if nom else ""
