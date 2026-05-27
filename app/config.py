@@ -81,6 +81,12 @@ class Settings:
     #   - "gpt-realtime-2"     → version explicite (immuable)
     # Si OpenAI sort un nouveau modèle, on ajuste l'env sans toucher au code.
     openai_realtime_model: str = _s("OPENAI_REALTIME_MODEL", "gpt-realtime")
+
+    # Modèle de transcription (whisper-like). À aligner avec le modèle Realtime :
+    #   - "gpt-4o-transcribe"     → bon défaut, compatible avec gpt-realtime
+    #   - "gpt-realtime-whisper"  → spécifique gpt-realtime, à tester si gpt-4o-transcribe hallucine
+    #   - "whisper-1"             → ancien, très stable, bonne base de fallback
+    openai_transcription_model: str = _s("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe")
     # VAD = Voice Activity Detection. Contrôle quand OpenAI considère
     # que l'utilisateur a fini de parler et déclenche une réponse.
     #

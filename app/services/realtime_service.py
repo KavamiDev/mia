@@ -127,13 +127,19 @@ async def _init_session(openai_ws, instructions: str, transcription_prompt: str 
     `server_vad` : c'est OpenAI qui détecte la fin de la parole côté
     utilisateur, déclenche automatiquement une réponse (create_response=True).
 
-    Transcription `gpt-4o-transcribe` AVEC bias lexical : on injecte les
-    plats du menu + le vocabulaire métier dans le `prompt`, ce qui force
-    le transcripteur à reconnaître ces mots plutôt que d'halluciner sur
-    de l'audio téléphonique bruité 8 kHz.
+    Transcription : modèle configurable (settings.openai_transcription_model).
+    Le `prompt` (bias lexical) est OPTIONNEL — on a observé en prod que biaiser
+    avec la liste des plats faisait halluciner des noms de plats sur audio
+    bruité (« Pizza Végétarienne » au lieu de « 4 personnes »). On laisse
+    la transcription FR native faire son boulot sans bias polluant.
     """
-    transcription_cfg = {"model": "gpt-4o-transcribe", "language": "fr"}
-    if transcription_prompt:
+    transcription_cfg = {
+        "model": settings.openai_transcription_model,
+        "language": "fr",
+    }
+    # Bias prompt seulement si très court (vocabulaire métier sans noms propres).
+    # Si plus de 200 chars : on skip pour ne pas polluer.
+    if transcription_prompt and len(transcription_prompt) <= 200:
         transcription_cfg["prompt"] = transcription_prompt
 
     await openai_ws.send(json.dumps({"type": "session.update", "session": {
@@ -169,16 +175,13 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
     menu = menu or []
     instructions = _build_instructions(restaurant, menu, caller_phone)
 
-    # Construit le bias de transcription : vocabulaire attendu côté client.
-    # Aide whisper/gpt-4o-transcribe à reconnaître ces mots dans l'audio bruité.
+    # ⚠ PAS de bias prompt avec les noms de plats : observé en prod, le modèle
+    # remplaçait des phrases entières par des noms de plats (« 4 personnes
+    # demain à 20h » → « Pizza Végétarienne »). On laisse la transcription
+    # FR native faire son travail. Si besoin, on peut ajouter un prompt
+    # COURT (< 200 chars) avec uniquement du vocabulaire générique.
     nom = restaurant.get("nom", "le restaurant")
-    plats = ", ".join(m.get("nom_plat", "") for m in menu[:15] if m.get("nom_plat"))
-    transcription_prompt = (
-        f"Conversation téléphonique en français avec un restaurant nommé {nom}. "
-        f"Vocabulaire attendu : réservation, commande à emporter, table, personnes, "
-        f"heure, date, menu, prix, horaires, addition, transférer, patron, équipe. "
-        f"Plats : {plats}."
-    )
+    transcription_prompt = ""  # désactivé — cf. doc dans _init_session
 
     # Greeting : éviter "chez Chez Marco" si le nom commence déjà par "Chez/Au/Le/La".
     nom_prefixe = nom.lower().split(" ", 1)[0] if nom else ""
