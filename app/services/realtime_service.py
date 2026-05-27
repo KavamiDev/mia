@@ -32,7 +32,7 @@ from fastapi.websockets import WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from app.config import settings
-from app.services.audio_debug import AudioDumper, strip_rtp_header
+from app.services.audio_debug import AudioDumper, amplify_ulaw, strip_rtp_header
 from app.services.call_log_service import CallTranscript
 from app.services.telnyx_service import telnyx_transfer
 from app.services.tool_service import execute_tool_call
@@ -175,16 +175,11 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
     menu = menu or []
     instructions = _build_instructions(restaurant, menu, caller_phone)
 
-    # Bias prompt COURT et GÉNÉRIQUE — aide la transcription sur audio 8kHz GSM
-    # sans la polluer. Pas de noms de plats (cause d'hallucinations « Pizza
-    # Végétarienne » au lieu de « 4 personnes »). Juste les structures qu'un
-    # client énonce typiquement : chiffres, heures, dates.
+    # PAS de bias prompt : depuis qu'on amplifie le signal (gain x5), le
+    # modèle n'a plus besoin de "compléter" l'audio. Tout bias devient une
+    # source d'hallucination. On laisse la transcription FR native faire.
     nom = restaurant.get("nom", "le restaurant")
-    transcription_prompt = (
-        "Conversation téléphonique restaurant en français. "
-        "Le client peut énoncer : un nombre de personnes (2, 4, 6, 8), "
-        "une heure (12h, 19h30, 20h), une date (demain, vendredi, le 15)."
-    )
+    transcription_prompt = ""
 
     # Greeting : éviter "chez Chez Marco" si le nom commence déjà par "Chez/Au/Le/La".
     nom_prefixe = nom.lower().split(" ", 1)[0] if nom else ""
@@ -256,6 +251,11 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             # début de signal (cause d'hallucinations OpenAI).
                             rtp_pkt = base64.b64decode(media["payload"])
                             raw_ulaw = strip_rtp_header(rtp_pkt)
+                            # Amplification : compense le signal faible des
+                            # opérateurs Réunion (~6% du max → ~28% avec gain=5).
+                            # Sans ça, OpenAI hallucine pour remplir les blancs.
+                            if settings.audio_input_gain != 1.0:
+                                raw_ulaw = amplify_ulaw(raw_ulaw, settings.audio_input_gain)
                             if audio_dumper:
                                 audio_dumper.write(raw_ulaw)
                             await openai_ws.send(json.dumps({

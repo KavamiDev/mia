@@ -16,12 +16,51 @@ Pourquoi ce module existe :
 """
 from __future__ import annotations
 
+import audioop  # type: ignore[deprecated]
 import logging
 import struct
 import time
 from pathlib import Path
 
 log = logging.getLogger("mia.audio")
+
+
+# ──────────────────────────────────────────────────────────
+# Amplification du signal entrant
+# ──────────────────────────────────────────────────────────
+#
+# Diagnostic prod sur audio Telnyx +262 (Réunion) :
+#   RMS=716, max amplitude=1884 / 32767 = 5.7% du max possible
+#   → le modèle de transcription reçoit un signal très faible et
+#     "remplit les blancs" avec des hallucinations plausibles.
+#
+# Fix : on amplifie le signal x5 par défaut avant envoi à OpenAI.
+# Audio passe de ~6% à ~28% du max → niveau confortable pour la transcription.
+
+
+def amplify_ulaw(ulaw_bytes: bytes, gain: float = 5.0) -> bytes:
+    """Amplifie un signal µ-law en passant par PCM16.
+
+    µ-law → PCM16 → multiplier par gain → re-µ-law
+
+    audioop.mul peut overflow si gain trop élevé : on attrape et on
+    baisse le gain progressivement plutôt que de cliper sauvagement.
+    """
+    if not ulaw_bytes or gain == 1.0:
+        return ulaw_bytes
+    try:
+        pcm16 = audioop.ulaw2lin(ulaw_bytes, 2)
+        amplified = audioop.mul(pcm16, 2, gain)
+        return audioop.lin2ulaw(amplified, 2)
+    except audioop.error:
+        # Overflow : on retente avec un gain réduit
+        try:
+            pcm16 = audioop.ulaw2lin(ulaw_bytes, 2)
+            amplified = audioop.mul(pcm16, 2, gain * 0.5)
+            return audioop.lin2ulaw(amplified, 2)
+        except Exception:
+            # Si même le gain réduit échoue, on retourne tel quel
+            return ulaw_bytes
 
 
 # ──────────────────────────────────────────────────────────

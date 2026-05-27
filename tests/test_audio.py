@@ -8,7 +8,7 @@ import os
 import struct
 import tempfile
 
-from app.services.audio_debug import AudioDumper, strip_rtp_header
+from app.services.audio_debug import AudioDumper, amplify_ulaw, strip_rtp_header
 
 
 # ─────────────────────────────────────────
@@ -166,6 +166,52 @@ def test_dumper_no_op_if_dir_invalid():
     d = AudioDumper("test", "/dev/null/foo", max_seconds=1)
     d.write(bytes(1000))  # ne doit pas crasher
     d.close()              # ne doit pas crasher
+
+
+# ─────────────────────────────────────────
+# amplify_ulaw — augmente le niveau du signal entrant
+# ─────────────────────────────────────────
+
+
+def test_amplify_gain_1_returns_input():
+    """Gain=1.0 → aucune modification (no-op)."""
+    data = bytes(range(100))
+    assert amplify_ulaw(data, gain=1.0) == data
+
+
+def test_amplify_empty_returns_empty():
+    assert amplify_ulaw(b"", gain=5.0) == b""
+
+
+def test_amplify_increases_signal_amplitude():
+    """Un signal faible doit avoir une amplitude supérieure après gain x5."""
+    import audioop
+
+    # Génère 100 ms de signal faible (sinus PCM16 → µ-law)
+    import math
+    pcm = b"".join(int(2000 * math.sin(i * 0.1)).to_bytes(2, "little", signed=True)
+                   for i in range(800))
+    ulaw = audioop.lin2ulaw(pcm, 2)
+
+    amplified = amplify_ulaw(ulaw, gain=5.0)
+    # Re-convertir pour comparer les amplitudes
+    pcm_after = audioop.ulaw2lin(amplified, 2)
+    rms_before = audioop.rms(pcm, 2)
+    rms_after = audioop.rms(pcm_after, 2)
+    # Le signal amplifié doit être au moins 2× plus fort (compromis µ-law non linéaire)
+    assert rms_after > rms_before * 2, f"rms_before={rms_before}, rms_after={rms_after}"
+
+
+def test_amplify_overflow_handled_gracefully():
+    """Gain énorme + signal fort → pas de crash, retourne audio valide."""
+    import audioop
+    # Signal déjà fort
+    pcm = b"\xff\x7f" * 800  # max PCM16
+    ulaw = audioop.lin2ulaw(pcm, 2)
+    result = amplify_ulaw(ulaw, gain=100.0)
+    # Doit retourner des bytes valides (soit amplifié soit unchanged)
+    assert isinstance(result, bytes)
+    assert len(result) > 0
 
 
 def test_dumper_close_idempotent():

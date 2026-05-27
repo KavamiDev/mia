@@ -105,6 +105,14 @@ class Settings:
     vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 400) # Capture mieux le DÉBUT du mot
     vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 900)   # Silence min — laisse les "oui" courts être captés
 
+    # --- Amplification du signal entrant ---
+    # Multiplicateur appliqué au µ-law Telnyx avant envoi à OpenAI.
+    # Sur Telnyx +262 (Réunion), l'audio livré est à ~6% du max possible :
+    # le modèle hallucine pour remplir les blancs. Avec gain=5, on remonte à
+    # ~28% = niveau confortable pour la transcription, sans saturation.
+    # gain=1.0 désactive l'amplification.
+    audio_input_gain: float = _f("AUDIO_INPUT_GAIN", 5.0)
+
     # --- Debug audio (optionnel) ---
     # Si défini, dump les 5 premières secondes d'audio entrant de chaque appel
     # dans ce dossier sous forme de .wav µ-law (lisible par QuickTime/VLC).
