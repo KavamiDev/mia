@@ -275,8 +275,14 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                         stream_sid = data.get("stream_id") or data.get("start", {}).get("streamSid")
                         log.info("[%s] Stream démarré : %s", cid, stream_sid)
                         stream_ready.set()
+                    elif ev == "stop":
+                        # 🔴 CRITIQUE : le client a raccroché. Telnyx envoie cet event.
+                        # Sans le détecter, le bridge attendait jusqu'au timeout 600s
+                        # = facturait ~3$ d'OpenAI Realtime POUR RIEN par appel raccroché.
+                        log.info("[%s] Event 'stop' reçu de Telnyx — appel raccroché", cid)
+                        return
             except WebSocketDisconnect:
-                log.info("[%s] Client déconnecté", cid)
+                log.info("[%s] Client déconnecté (WS close)", cid)
 
         # ───────────────────────────────────────
         # Tâche 2 : Message d'accueil
@@ -456,10 +462,31 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                         log.info("[%s] Transfert effectué", cid)
                         return
 
-        # Lance les 3 tâches en parallèle. Si une tombe (déconnexion, erreur),
-        # gather propage l'exception et on nettoie.
+        # 🔴 FIX CRITIQUE COÛTS : on utilise asyncio.wait(FIRST_COMPLETED) au lieu
+        # de asyncio.gather. Dès QU'UNE tâche se termine (event 'stop' Telnyx,
+        # WebSocketDisconnect, erreur OpenAI), on cancel IMMÉDIATEMENT les
+        # autres tâches. Sinon le bridge continuait à tourner jusqu'au timeout
+        # 600s en facturant OpenAI Realtime pour rien (~3$ par appel raccroché).
+        tasks = [
+            asyncio.create_task(send_greeting(), name=f"greet-{cid}"),
+            asyncio.create_task(receive_from_client(), name=f"recv-{cid}"),
+            asyncio.create_task(send_to_client(), name=f"send-{cid}"),
+        ]
         try:
-            await asyncio.gather(send_greeting(), receive_from_client(), send_to_client())
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            # Cancel toutes les tâches restantes — l'appel est terminé
+            for task in pending:
+                task.cancel()
+            # On attend brièvement leur fin pour libérer proprement les ressources
+            if pending:
+                await asyncio.wait(pending, timeout=2.0)
+            log.info("[%s] Bridge terminé : %d done, %d cancelled", cid, len(done), len(pending))
+            # Propager une éventuelle exception remontée par la tâche qui s'est terminée
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, asyncio.CancelledError):
+                    log.warning("[%s] Tâche %s terminée avec exception : %s",
+                                cid, task.get_name(), exc)
         except asyncio.CancelledError:
             pass
         except Exception as e:

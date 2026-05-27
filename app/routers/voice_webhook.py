@@ -216,17 +216,19 @@ async def handle_media_stream(websocket: WebSocket):
         db.close()
 
     # ─── Étape 4 : lancer le bridge avec un timeout global ───
-    # Coupe-circuit anti-coût : si un appel reste ouvert >10 min, on tue la
-    # session. OpenAI Realtime coûte ~0.30$/min input audio, un bug qui boucle
-    # peut générer des dizaines d'euros silencieusement.
+    # Coupe-circuit anti-coût : si un appel reste ouvert >5 min, on tue la
+    # session. OpenAI Realtime coûte ~0.30$/min input audio.
+    # Note : avec le fix asyncio.wait(FIRST_COMPLETED) dans run_realtime_bridge
+    # + détection event 'stop' Telnyx, ce timeout n'est qu'un GARDE-FOU.
+    # En cas normal, le bridge se termine en <5s après que le client raccroche.
     try:
         await asyncio.wait_for(
             run_realtime_bridge(websocket, restaurant, menu=menu, caller_phone=caller_phone,
                                 call_control_id=call_control_id, initial_messages=buffered),
-            timeout=600,
+            timeout=300,
         )
     except asyncio.TimeoutError:
-        log.warning("media-stream : appel >10min, coupé par timeout global")
+        log.warning("media-stream : appel >5min, coupé par timeout global")
     except Exception as e:
         log.exception("media-stream : %s", e)
     finally:
