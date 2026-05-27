@@ -41,7 +41,8 @@ _CONFIRM_PATTERNS = [
     r"\bbien\b",            # "bien sûr", "bien noté"
 ]
 
-# Rejets explicites — annulent l'action en cours.
+# Rejets explicites OU ambiguïtés — annulent l'action en cours.
+# Le client doit donner un OUI franc, pas un "peut-être".
 _REJECT_PATTERNS = [
     r"\bnon\b",
     r"\bannule\b",
@@ -55,6 +56,15 @@ _REJECT_PATTERNS = [
     r"\bpas vraiment\b",
     r"\bplutot pas\b",      # "plutôt pas"
     r"\bnegatif\b",         # "négatif"
+    # Ambiguïtés — on refuse de valider sur incertitude
+    r"\bpeut etre\b",       # "peut-être" (apostrophe → espace par _normalize)
+    r"\bptet\b",            # "ptêt"
+    r"\bje sais pas\b",     # "je sais pas"
+    r"\bje ne sais pas\b",
+    r"\bhmm\b",             # hésitation
+    r"\beuh\b",
+    r"\bje verrais\b",      # "je verrai"
+    r"\battends voir\b",
 ]
 
 

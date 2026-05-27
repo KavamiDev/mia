@@ -39,12 +39,10 @@ log = logging.getLogger("mia.audio")
 
 
 def amplify_ulaw(ulaw_bytes: bytes, gain: float = 5.0) -> bytes:
-    """Amplifie un signal µ-law en passant par PCM16.
+    """Amplifie un signal µ-law avec un gain FIXE (mode legacy).
 
-    µ-law → PCM16 → multiplier par gain → re-µ-law
-
-    audioop.mul peut overflow si gain trop élevé : on attrape et on
-    baisse le gain progressivement plutôt que de cliper sauvagement.
+    Conservé pour rétro-compat et tests. En prod on préfère normalize_ulaw
+    qui s'adapte par chunk (évite la saturation sur les voix fortes).
     """
     if not ulaw_bytes or gain == 1.0:
         return ulaw_bytes
@@ -53,13 +51,64 @@ def amplify_ulaw(ulaw_bytes: bytes, gain: float = 5.0) -> bytes:
         amplified = audioop.mul(pcm16, 2, gain)
         return audioop.lin2ulaw(amplified, 2)
     except audioop.error:
-        # Overflow : on retente avec un gain réduit
         try:
             pcm16 = audioop.ulaw2lin(ulaw_bytes, 2)
             amplified = audioop.mul(pcm16, 2, gain * 0.5)
             return audioop.lin2ulaw(amplified, 2)
         except Exception:
-            # Si même le gain réduit échoue, on retourne tel quel
+            return ulaw_bytes
+
+
+def normalize_ulaw(
+    ulaw_bytes: bytes,
+    *,
+    target_rms: int = 6000,
+    max_gain: float = 20.0,
+    min_gain: float = 1.0,
+    silence_threshold: int = 100,
+) -> bytes:
+    """Auto-gain dynamique (AGC) vers un RMS cible.
+
+    Pour chaque chunk audio µ-law :
+      1. Convertit en PCM16 et mesure le RMS réel
+      2. Calcule le gain nécessaire pour atteindre `target_rms`
+      3. Cap entre [min_gain, max_gain] pour éviter la saturation
+      4. Applique le gain (avec fallback si overflow)
+
+    Avantages vs gain fixe :
+      - S'adapte aux différentes voix (forte / faible)
+      - S'adapte aux différents téléphones / opérateurs
+      - Évite la saturation qui crée des hallucinations russe/chinois
+      - Évite la sous-amplification qui fait halluciner OpenAI
+
+    Args:
+        target_rms: cible RMS visée (6000 = parole bien claire, OpenAI confortable)
+        max_gain: plafond multiplicateur (évite de booster du bruit en hurlement)
+        min_gain: plancher (1.0 = jamais baisser le signal)
+        silence_threshold: en dessous, on ne touche pas (= silence ou bruit fond)
+    """
+    if not ulaw_bytes:
+        return ulaw_bytes
+    try:
+        pcm16 = audioop.ulaw2lin(ulaw_bytes, 2)
+        rms = audioop.rms(pcm16, 2)
+        if rms < silence_threshold:
+            # Silence : ne pas amplifier du bruit de fond en cri
+            return ulaw_bytes
+        gain = min(max_gain, max(min_gain, target_rms / rms))
+        amplified = audioop.mul(pcm16, 2, gain)
+        return audioop.lin2ulaw(amplified, 2)
+    except audioop.error:
+        # Overflow → retry avec demi-gain (signal exceptionnellement fort)
+        try:
+            pcm16 = audioop.ulaw2lin(ulaw_bytes, 2)
+            rms = audioop.rms(pcm16, 2)
+            if rms < silence_threshold:
+                return ulaw_bytes
+            safe_gain = min(max_gain * 0.5, max(min_gain, target_rms / rms))
+            amplified = audioop.mul(pcm16, 2, safe_gain)
+            return audioop.lin2ulaw(amplified, 2)
+        except Exception:
             return ulaw_bytes
 
 

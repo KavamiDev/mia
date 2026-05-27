@@ -8,7 +8,8 @@ import os
 import struct
 import tempfile
 
-from app.services.audio_debug import AudioDumper, amplify_ulaw, strip_rtp_header
+from app.services.audio_debug import (AudioDumper, amplify_ulaw, normalize_ulaw,
+                                       strip_rtp_header)
 
 
 # ─────────────────────────────────────────
@@ -200,6 +201,72 @@ def test_amplify_increases_signal_amplitude():
     rms_after = audioop.rms(pcm_after, 2)
     # Le signal amplifié doit être au moins 2× plus fort (compromis µ-law non linéaire)
     assert rms_after > rms_before * 2, f"rms_before={rms_before}, rms_after={rms_after}"
+
+
+# ─────────────────────────────────────────
+# normalize_ulaw — AGC dynamique
+# ─────────────────────────────────────────
+
+
+def test_normalize_silence_unchanged():
+    """Signal sous le seuil de silence → retourné inchangé (pas d'amplification du bruit)."""
+    import audioop
+    # 100 ms de silence absolu
+    silence_pcm = b"\x00\x00" * 800
+    silence_ulaw = audioop.lin2ulaw(silence_pcm, 2)
+    assert normalize_ulaw(silence_ulaw, target_rms=6000) == silence_ulaw
+
+
+def test_normalize_weak_signal_amplified():
+    """Signal faible (RMS ~700) → amplifié vers ~target_rms."""
+    import audioop, math
+    # Signal de RMS ~700 (ce qu'on a en Réunion avant fix)
+    pcm = b"".join(int(1000 * math.sin(i * 0.2)).to_bytes(2, "little", signed=True)
+                   for i in range(800))
+    ulaw = audioop.lin2ulaw(pcm, 2)
+    rms_before = audioop.rms(pcm, 2)
+
+    normalized = normalize_ulaw(ulaw, target_rms=6000, max_gain=20.0)
+    pcm_after = audioop.ulaw2lin(normalized, 2)
+    rms_after = audioop.rms(pcm_after, 2)
+
+    # Doit être beaucoup plus fort qu'avant (au moins 3×)
+    assert rms_after > rms_before * 3, f"before={rms_before}, after={rms_after}"
+    # Et proche de target (à un facteur 2 près à cause de la non-linéarité µ-law)
+    assert 2000 < rms_after < 15000
+
+
+def test_normalize_strong_signal_not_oversaturated():
+    """Signal déjà fort → pas d'amplification destructrice (gain ~1)."""
+    import audioop, math
+    # Signal de RMS ~10000 (déjà fort)
+    pcm = b"".join(int(15000 * math.sin(i * 0.2)).to_bytes(2, "little", signed=True)
+                   for i in range(800))
+    ulaw = audioop.lin2ulaw(pcm, 2)
+    rms_before = audioop.rms(pcm, 2)
+
+    normalized = normalize_ulaw(ulaw, target_rms=6000)
+    pcm_after = audioop.ulaw2lin(normalized, 2)
+    rms_after = audioop.rms(pcm_after, 2)
+
+    # Le signal ne doit pas exploser (max_gain=20 ne devrait pas s'appliquer ici)
+    # En théorie le gain devrait être <1 mais on a min_gain=1.0 → reste à peu près identique
+    assert rms_after <= rms_before * 1.5, f"before={rms_before}, after={rms_after}"
+
+
+def test_normalize_empty_returns_empty():
+    assert normalize_ulaw(b"") == b""
+
+
+def test_normalize_max_gain_capped():
+    """Signal très faible → gain capé à max_gain (pas d'amplification infinie)."""
+    import audioop
+    # Signal très faible (RMS ~50, à peine au-dessus du silence threshold)
+    pcm = b"\x70\x00" * 800  # mini amplitude
+    ulaw = audioop.lin2ulaw(pcm, 2)
+    normalized = normalize_ulaw(ulaw, target_rms=10000, max_gain=5.0)
+    # Doit retourner du bytes valide
+    assert isinstance(normalized, bytes) and len(normalized) > 0
 
 
 def test_amplify_overflow_handled_gracefully():

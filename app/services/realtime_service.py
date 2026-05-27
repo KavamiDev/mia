@@ -32,7 +32,8 @@ from fastapi.websockets import WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from app.config import settings
-from app.services.audio_debug import AudioDumper, amplify_ulaw, strip_rtp_header
+from app.services.audio_debug import (AudioDumper, amplify_ulaw, normalize_ulaw,
+                                       strip_rtp_header)
 from app.services.call_log_service import CallTranscript
 from app.services.telnyx_service import telnyx_transfer
 from app.services.tool_service import execute_tool_call
@@ -251,11 +252,19 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             # début de signal (cause d'hallucinations OpenAI).
                             rtp_pkt = base64.b64decode(media["payload"])
                             raw_ulaw = strip_rtp_header(rtp_pkt)
-                            # Amplification : compense le signal faible des
-                            # opérateurs Réunion (~6% du max → ~28% avec gain=5).
-                            # Sans ça, OpenAI hallucine pour remplir les blancs.
-                            if settings.audio_input_gain != 1.0:
+                            # Amplification audio :
+                            #   - Si AUDIO_INPUT_GAIN > 0 : gain fixe LEGACY (debug)
+                            #   - Sinon : AGC dynamique vers AUDIO_TARGET_RMS
+                            # L'AGC évite à la fois la sous-amplification (modèle
+                            # hallucine) ET la saturation (modèle parle russe).
+                            if settings.audio_input_gain > 0:
                                 raw_ulaw = amplify_ulaw(raw_ulaw, settings.audio_input_gain)
+                            else:
+                                raw_ulaw = normalize_ulaw(
+                                    raw_ulaw,
+                                    target_rms=settings.audio_target_rms,
+                                    max_gain=settings.audio_max_gain,
+                                )
                             if audio_dumper:
                                 audio_dumper.write(raw_ulaw)
                             await openai_ws.send(json.dumps({

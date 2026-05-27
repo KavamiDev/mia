@@ -105,13 +105,16 @@ class Settings:
     vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 400) # Capture mieux le DÉBUT du mot
     vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 900)   # Silence min — laisse les "oui" courts être captés
 
-    # --- Amplification du signal entrant ---
-    # Multiplicateur appliqué au µ-law Telnyx avant envoi à OpenAI.
-    # Sur Telnyx +262 (Réunion), l'audio livré est à ~6% du max possible :
-    # le modèle hallucine pour remplir les blancs. Avec gain=5, on remonte à
-    # ~28% = niveau confortable pour la transcription, sans saturation.
-    # gain=1.0 désactive l'amplification.
-    audio_input_gain: float = _f("AUDIO_INPUT_GAIN", 5.0)
+    # --- AGC (Auto-Gain Control) sur l'audio entrant ---
+    # Au lieu d'un gain fixe (qui sature les voix fortes et sous-amplifie les
+    # voix faibles), on ajuste dynamiquement le gain pour chaque chunk afin
+    # d'atteindre target_rms. S'adapte automatiquement aux différentes voix
+    # et téléphones — pas de calibration manuelle nécessaire.
+    audio_target_rms: int = _i("AUDIO_TARGET_RMS", 6000)   # RMS cible (parole confortable)
+    audio_max_gain: float = _f("AUDIO_MAX_GAIN", 20.0)     # cap pour éviter la saturation
+    # Mode gain fixe LEGACY : si > 0, on bypass l'AGC et on applique ce gain.
+    # Utile pour debug / A/B. Mettre 0 pour activer l'AGC normale.
+    audio_input_gain: float = _f("AUDIO_INPUT_GAIN", 0.0)
 
     # --- Debug audio (optionnel) ---
     # Si défini, dump les 5 premières secondes d'audio entrant de chaque appel
