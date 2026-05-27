@@ -134,10 +134,12 @@ def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, resta
     jour = date_req.split("-")[-1].lstrip("0") if "-" in date_req else date_req
     # Le récap vocal mentionne le SMS uniquement si on en envoie un
     sms_msg = " Vous allez recevoir un SMS." if (sms_to_client and tel) else ""
+    # Closing naturelle : code + récap + SMS + au revoir chaleureux + invitation à raccrocher.
+    # Le client peut alors raccrocher sereinement.
     return {"success": True, "code": code, "recap_vocal":
             f"Parfait ! Votre réservation {_spell(code)} est confirmée. "
             f"{personnes} personne{'s' if personnes > 1 else ''}, le {jour} à {heure}."
-            f"{sms_msg} À bientôt !"}
+            f"{sms_msg} Merci de votre appel, à bientôt, bonne journée !"}
 
 
 def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, restaurant_name,
@@ -200,7 +202,7 @@ def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, re
     sms_msg = " Vous allez recevoir un SMS." if (sms_to_client and tel) else ""
     return {"success": True, "code": code, "recap_vocal":
             f"Parfait ! Votre commande {_spell(code)} est enregistrée : {recap_full}. "
-            f"Total : {total:.2f} euros.{sms_msg} À tout à l'heure !"}
+            f"Total : {total:.2f} euros.{sms_msg} Merci, à tout à l'heure, bonne journée !"}
 
 
 def _transfer(args, restaurant_name) -> dict:
