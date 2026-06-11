@@ -12,6 +12,7 @@ from app.auth import require_api_key
 from app.database import get_db
 from app.models import MenuItem, Restaurant
 from app.schemas import MenuItemCreate, MenuItemResponse
+from app.services import restaurant_cache
 
 router = APIRouter(prefix="/menu", tags=["menu"], dependencies=[Depends(require_api_key)])
 
@@ -44,6 +45,7 @@ def create_menu_bulk(restaurant_id: int, data: MenuBulkRequest, db: Session = De
         db.add(m)
         created.append({"nom_plat": m.nom_plat, "prix": m.prix})
     db.commit()
+    restaurant_cache.invalidate(restaurant_id)
     return {"ok": True, "added": len(created), "items": created}
 
 
@@ -54,6 +56,7 @@ def create_menu_item(data: MenuItemCreate, db: Session = Depends(get_db)):
     db.add(m)
     db.commit()
     db.refresh(m)
+    restaurant_cache.invalidate(m.restaurant_id)
     return m
 
 
@@ -63,6 +66,8 @@ def delete_menu_item(item_id: int, db: Session = Depends(get_db)):
     m = db.query(MenuItem).filter(MenuItem.id == item_id).first()
     if not m:
         raise HTTPException(status_code=404, detail="Plat non trouvé")
+    rid = m.restaurant_id
     db.delete(m)
     db.commit()
+    restaurant_cache.invalidate(rid)
     return {"ok": True}

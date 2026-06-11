@@ -12,6 +12,7 @@ from app.auth import require_api_key
 from app.database import get_db
 from app.models import Restaurant
 from app.schemas import RestaurantCreate, RestaurantResponse
+from app.services import restaurant_cache
 
 router = APIRouter(prefix="/restaurants", tags=["restaurants"], dependencies=[Depends(require_api_key)])
 
@@ -47,4 +48,5 @@ def update_restaurant(restaurant_id: int, data: RestaurantCreate, db: Session = 
         setattr(r, k, v)
     db.commit()
     db.refresh(r)
+    restaurant_cache.invalidate(restaurant_id)
     return r

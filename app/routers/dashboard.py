@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models import CallLog, Commande, MenuItem, Reservation, Restaurant, User
+from app.services import restaurant_cache
 from app.utils.auth_hash import hash_password, verify_password
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -302,6 +303,7 @@ async def update_restaurant(
     r.sms_to_restaurant = bool(sms_to_restaurant)
     try:
         db.commit()
+        restaurant_cache.invalidate(restaurant_id)
     except IntegrityError as e:
         db.rollback()
         db.refresh(r)
@@ -353,6 +355,7 @@ async def add_menu_item(
                  description=description.strip() or None)
     db.add(m)
     db.commit()
+    restaurant_cache.invalidate(restaurant_id)
     return RedirectResponse(f"/dashboard/restaurants/{restaurant_id}/menu", status_code=302)
 
 
@@ -369,6 +372,7 @@ async def delete_menu_item(request: Request, restaurant_id: int, item_id: int,
     if m:
         db.delete(m)
         db.commit()
+        restaurant_cache.invalidate(restaurant_id)
     return RedirectResponse(f"/dashboard/restaurants/{restaurant_id}/menu", status_code=302)
 
 

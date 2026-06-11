@@ -24,15 +24,23 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import SessionLocal, get_db
 from app.models import MenuItem, Restaurant
+from app.services import restaurant_cache
 from app.services.realtime_service import run_realtime_bridge
 from app.services.telnyx_service import telnyx_answer, verify_telnyx_signature
 from app.utils.phone import matches_phone, normalize_phone
+from app.utils.ratelimit import SlidingWindowRateLimiter
 
 router = APIRouter(tags=["voice"])
 log = logging.getLogger("mia.voice")
 
 # Durée de validité d'un client_state signé : un appel doit s'établir vite.
 _CLIENT_STATE_TTL_SECONDS = 120
+
+# Anti-flood du webhook : la vérif Ed25519 + le lookup restaurant coûtent du
+# CPU/DB, et le process sert aussi l'audio temps réel. Limite par IP source,
+# AVANT la vérification de signature. None = désactivé (env = 0).
+_webhook_limiter = (SlidingWindowRateLimiter(settings.webhook_rate_limit_per_minute, 60.0)
+                    if settings.webhook_rate_limit_per_minute > 0 else None)
 
 
 def _sign_client_state(payload: dict) -> str:
@@ -104,6 +112,13 @@ async def handle_telnyx_webhook(request: Request, db: Session = Depends(get_db))
     Sécurité : vérifie la signature Ed25519 Telnyx pour bloquer les webhooks
     forgés (sinon un attaquant peut consommer notre clé API + générer des coûts).
     """
+    # 429 → Telnyx retentera plus tard : un pic légitime n'est que retardé,
+    # un flood forgé est coupé avant la crypto et la DB.
+    client_ip = request.client.host if request.client else "?"
+    if _webhook_limiter and not _webhook_limiter.allow(client_ip):
+        log.warning("Webhook Telnyx rejeté : rate limit dépassé (ip=%s)", client_ip)
+        return JSONResponse({"error": "Too many requests"}, status_code=429)
+
     raw_body = await request.body()
     if not verify_telnyx_signature(request.headers, raw_body):
         log.warning("Webhook Telnyx rejeté : signature invalide")
@@ -194,26 +209,34 @@ async def handle_media_stream(websocket: WebSocket):
         await websocket.close(code=4000)
         return
 
-    # ─── Étape 3 : charger le restaurant et son menu (1 round-trip DB) ───
+    # ─── Étape 3 : charger le restaurant et son menu ───
+    # Cache TTL d'abord (60s par défaut) : évite 2 SELECT au moment précis où
+    # la latence compte le plus — le client attend le « Bonjour ». Les
+    # mutations API/dashboard invalident l'entrée immédiatement.
     # On sérialise en dict simple pour ne pas trimballer l'ORM dans le bridge
     # (qui tourne dans des tâches asyncio).
-    db = SessionLocal()
-    try:
-        r = db.query(Restaurant).filter(Restaurant.id == rid).first()
-        if not r:
-            await websocket.close(code=4000)
-            return
-        restaurant = {"id": r.id, "nom": r.nom, "telephone": r.telephone,
-                      "horaires": r.horaires or "", "adresse": r.adresse or "",
-                      "quota_reservations": r.quota_reservations,
-                      "quota_commandes": r.quota_commandes,
-                      # Toggles SMS — défaut True pour rétro-compat
-                      "sms_to_client": r.sms_to_client if r.sms_to_client is not None else True,
-                      "sms_to_restaurant": r.sms_to_restaurant if r.sms_to_restaurant is not None else True}
-        menu = [{"nom_plat": m.nom_plat, "prix": m.prix, "description": m.description or ""}
-                for m in db.query(MenuItem).filter(MenuItem.restaurant_id == rid).all()]
-    finally:
-        db.close()
+    cached = restaurant_cache.get(rid)
+    if cached:
+        restaurant, menu = cached
+    else:
+        db = SessionLocal()
+        try:
+            r = db.query(Restaurant).filter(Restaurant.id == rid).first()
+            if not r:
+                await websocket.close(code=4000)
+                return
+            restaurant = {"id": r.id, "nom": r.nom, "telephone": r.telephone,
+                          "horaires": r.horaires or "", "adresse": r.adresse or "",
+                          "quota_reservations": r.quota_reservations,
+                          "quota_commandes": r.quota_commandes,
+                          # Toggles SMS — défaut True pour rétro-compat
+                          "sms_to_client": r.sms_to_client if r.sms_to_client is not None else True,
+                          "sms_to_restaurant": r.sms_to_restaurant if r.sms_to_restaurant is not None else True}
+            menu = [{"nom_plat": m.nom_plat, "prix": m.prix, "description": m.description or ""}
+                    for m in db.query(MenuItem).filter(MenuItem.restaurant_id == rid).all()]
+        finally:
+            db.close()
+        restaurant_cache.put(rid, restaurant, menu)
 
     # ─── Étape 4 : lancer le bridge avec un timeout global ───
     # Coupe-circuit anti-coût : si un appel reste ouvert >5 min, on tue la

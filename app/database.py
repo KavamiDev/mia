@@ -13,7 +13,16 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
 
-engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=300)
+# Dimensionnement du pool : uniquement pour PostgreSQL. SQLite (tests) utilise
+# un pool spécifique qui n'accepte pas ces arguments.
+_pool_kwargs = (
+    {"pool_size": settings.db_pool_size,
+     "max_overflow": settings.db_max_overflow,
+     "pool_timeout": settings.db_pool_timeout}
+    if settings.database_url.startswith("postgresql") else {}
+)
+engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=300,
+                       **_pool_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
