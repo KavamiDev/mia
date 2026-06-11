@@ -6,6 +6,7 @@ variantes courantes du français parlé (accents, casse, ponctuation, syntaxe).
 import pytest
 
 from app.utils.confirmation import (
+    expects_short_reply,
     has_confirmation,
     has_rejection,
     is_confirmed,
@@ -161,3 +162,42 @@ def test_word_boundary_no_match():
     assert not has_rejection("renoncer ce projet")
     # En revanche « pas non plus » contient le mot « non » entier → match
     assert has_rejection("pas non plus")
+
+
+# ─────────────────────────────────────────
+# expects_short_reply (VAD adaptatif)
+# ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("text", [
+    "Je récap : 4 personnes demain à 20h. Je valide ?",
+    "Donc 2 pizzas Reine et un Coca. On valide ?",
+    "Vous me confirmez par un OUI s'il vous plaît ?",
+    "Vous êtes toujours là ? Vous me confirmez avec un OUI ?",
+    "6 personnes vendredi à 19h, c'est bien ça ?",
+    "Je récapitule : une Margherita à emporter. Je confirme ?",
+])
+def test_expects_short_reply_on_validation_questions(text):
+    """Les questions de validation de MIA → réponse courte attendue."""
+    assert expects_short_reply(text)
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "Bonjour, bienvenue chez Marco, MIA à l'appareil.",
+    "Pour combien de personnes ?",
+    "Nous avons la Margherita à 12 euros et la Reine à 14 euros.",
+    "Parfait ! Votre réservation R 4 T 2 K est confirmée. Bonne journée !",
+    # « je valide » en DÉBUT d'un long tour de clôture : pas une question.
+    "Je valide tout de suite votre demande et je vous donne le code, "
+    "un instant s'il vous plaît, je vérifie nos disponibilités pour "
+    "vendredi soir et je reviens vers vous immédiatement avec la réponse.",
+])
+def test_expects_short_reply_negative(text):
+    """Les autres tours de MIA ne déclenchent pas le mode réponse courte."""
+    assert not expects_short_reply(text)
+
+
+def test_expects_short_reply_handles_accents_and_case():
+    assert expects_short_reply("JE VALIDE ?")
+    assert expects_short_reply("c'est bien ça ?")

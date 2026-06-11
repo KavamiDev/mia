@@ -311,3 +311,79 @@ def test_unknown_tool_returns_error():
     )
     assert result["success"] is False
     assert "Fonction" in result.get("error", "") or "inconnue" in result.get("error", "")
+
+
+# ─────────────────────────────────────────
+# defer_sms : SMS hors du chemin critique vocal
+# ─────────────────────────────────────────
+
+
+def test_defer_sms_reservation_returns_outbox(sample_restaurant, db_session):
+    """defer_sms=True → aucun envoi direct, les SMS sont dans sms_outbox."""
+    with patch.object(tool_service, "send_sms") as mock_sms:
+        result = execute_tool_call(
+            sample_restaurant.id, "create_reservation",
+            {"personnes": 4, "heure": "20h30", "date": "2026-06-15"},
+            menu=[], quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco", defer_sms=True,
+        )
+
+        assert result["success"] is True
+        mock_sms.assert_not_called()
+        outbox = result["sms_outbox"]
+        assert len(outbox) == 2
+        destinations = [to for to, _ in outbox]
+        assert "+33612345678" in destinations  # resto
+        assert "+33712345678" in destinations  # client
+        # Le contenu reste identique au mode synchrone
+        assert any(result["code"] in body for _, body in outbox)
+
+
+def test_defer_sms_commande_returns_outbox(sample_restaurant, db_session):
+    with patch.object(tool_service, "send_sms") as mock_sms:
+        result = execute_tool_call(
+            sample_restaurant.id, "create_commande",
+            {"items": [{"plat": "Pizza Margherita", "qty": 2}]},
+            menu=[{"nom_plat": "Pizza Margherita", "prix": 12.0}],
+            quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco", defer_sms=True,
+        )
+
+        assert result["success"] is True
+        mock_sms.assert_not_called()
+        assert len(result["sms_outbox"]) == 2
+
+
+def test_defer_sms_respects_toggles(sample_restaurant, db_session):
+    """Toggles SMS désactivés → outbox vide (et toujours aucun envoi direct)."""
+    with patch.object(tool_service, "send_sms") as mock_sms:
+        result = execute_tool_call(
+            sample_restaurant.id, "create_reservation",
+            {"personnes": 2, "heure": "19h", "date": "2026-06-16"},
+            menu=[], quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco",
+            sms_to_client=False, sms_to_restaurant=False, defer_sms=True,
+        )
+
+        assert result["success"] is True
+        mock_sms.assert_not_called()
+        assert result["sms_outbox"] == []
+
+
+def test_default_mode_still_sends_synchronously(sample_restaurant, db_session):
+    """Sans defer_sms (API inchangée) → envoi direct, pas de sms_outbox."""
+    with patch.object(tool_service, "send_sms", return_value=True) as mock_sms:
+        result = execute_tool_call(
+            sample_restaurant.id, "create_reservation",
+            {"personnes": 3, "heure": "21h", "date": "2026-06-17"},
+            menu=[], quota_reservations=20, quota_commandes=50,
+            restaurant_phone="+33612345678", caller_phone="+33712345678",
+            restaurant_name="Chez Marco",
+        )
+
+        assert result["success"] is True
+        assert mock_sms.call_count == 2
+        assert "sms_outbox" not in result

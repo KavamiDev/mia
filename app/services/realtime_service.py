@@ -35,9 +35,10 @@ from app.config import settings
 from app.services.audio_debug import (AudioDumper, amplify_ulaw, normalize_ulaw,
                                        strip_rtp_header)
 from app.services.call_log_service import CallTranscript
+from app.services.sms_service import send_sms
 from app.services.telnyx_service import telnyx_transfer
 from app.services.tool_service import execute_tool_call
-from app.utils.confirmation import is_confirmed
+from app.utils.confirmation import expects_short_reply, is_confirmed
 
 # Tools qui modifient l'état (DB + SMS) — exigent une confirmation orale
 # du client juste avant. Sinon : on bloque pour éviter les SAV.
@@ -103,6 +104,35 @@ def _build_instructions(restaurant: dict, menu: list[dict], caller_phone: str) -
     return f"{SYSTEM_PROMPT}\n\n## Contexte restaurant\n" + "\n".join(lines)
 
 
+# Réfs fortes vers les tâches SMS d'arrière-plan : sans elles, asyncio peut
+# garbage-collecter une tâche en cours (fire-and-forget classique).
+_sms_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_sms_tasks(outbox: list[tuple[str, str]], cid: str) -> None:
+    """Envoie les SMS en arrière-plan, HORS du chemin critique vocal.
+
+    Avant : le bridge attendait DB + 2 requêtes HTTP SMS (timeout 15s chacune)
+    avant de renvoyer le function_call_output → le client restait en silence
+    après son « oui ». Maintenant le récap vocal part immédiatement et les SMS
+    suivent en parallèle (best-effort, comme avant : un SMS qui échoue ne
+    remet pas en cause la réservation).
+    """
+    def _log_result(task: asyncio.Task) -> None:
+        _sms_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log.warning("[%s] SMS arrière-plan échoué : %s", cid, exc)
+
+    for to, body in outbox:
+        task = asyncio.create_task(asyncio.to_thread(send_sms, to, body),
+                                   name=f"sms-{cid}")
+        _sms_tasks.add(task)
+        task.add_done_callback(_log_result)
+
+
 async def _safe_send(ws: WebSocket, payload: dict) -> bool:
     """Envoie un JSON sur le WebSocket Telnyx sans crasher si déconnecté.
 
@@ -117,6 +147,51 @@ async def _safe_send(ws: WebSocket, payload: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+def _vad_config(silence_ms: int) -> dict:
+    """Bloc turn_detection complet pour session.update.
+
+    Centralisé car envoyé deux fois : à l'init de session ET en cours d'appel
+    par le VAD adaptatif (silence réduit quand une réponse courte est attendue).
+    """
+    return {"type": "server_vad", "threshold": settings.vad_threshold,
+            "prefix_padding_ms": settings.vad_prefix_padding_ms,
+            "silence_duration_ms": silence_ms,
+            "create_response": True}
+
+
+async def _connect_openai(cid: str, ssl_ctx, *, attempts: int | None = None,
+                          base_delay: float = 0.5):
+    """Connexion WSS OpenAI Realtime avec retry + backoff exponentiel.
+
+    Un blip réseau/DNS transitoire au décrochage ne doit pas faire perdre
+    l'appel : on retente (0.5s puis 1s par défaut). Le client entend au pire
+    1-2 secondes de silence en plus avant le greeting.
+
+    Returns:
+        La connexion ouverte, ou None si toutes les tentatives ont échoué
+        (l'appelant doit alors terminer l'appel proprement).
+    """
+    attempts = max(attempts if attempts is not None else settings.openai_connect_attempts, 1)
+    for attempt in range(1, attempts + 1):
+        try:
+            return await websockets.connect(
+                f"wss://api.openai.com/v1/realtime?model={settings.openai_realtime_model}",
+                additional_headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                ssl=ssl_ctx,
+                open_timeout=10,
+            )
+        except Exception as e:
+            if attempt == attempts:
+                log.error("[%s] Connexion OpenAI échouée après %d tentatives : %s",
+                          cid, attempts, e)
+                return None
+            delay = base_delay * (2 ** (attempt - 1))
+            log.warning("[%s] Connexion OpenAI %d/%d échouée (%s) — retry dans %.1fs",
+                        cid, attempt, attempts, e, delay)
+            await asyncio.sleep(delay)
+    return None
 
 
 async def _init_session(openai_ws, instructions: str, transcription_prompt: str = "") -> None:
@@ -150,11 +225,7 @@ async def _init_session(openai_ws, instructions: str, transcription_prompt: str 
             "input": {
                 "format": {"type": "audio/pcmu"},
                 "transcription": transcription_cfg,
-                "turn_detection": {
-                    "type": "server_vad", "threshold": settings.vad_threshold,
-                    "prefix_padding_ms": settings.vad_prefix_padding_ms,
-                    "silence_duration_ms": settings.vad_silence_duration_ms,
-                    "create_response": True}},
+                "turn_detection": _vad_config(settings.vad_silence_duration_ms)},
             "output": {"format": {"type": "audio/pcmu"}, "voice": settings.voice_realtime_voice}},
         "tools": REALTIME_TOOLS, "tool_choice": "auto"}}))
 
@@ -192,11 +263,12 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
     ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     log.info("[%s] Connexion OpenAI Realtime...", cid)
 
-    async with websockets.connect(
-        f"wss://api.openai.com/v1/realtime?model={settings.openai_realtime_model}",
-        additional_headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-        ssl=ssl_ctx,
-    ) as openai_ws:
+    openai_ws = await _connect_openai(cid, ssl_ctx)
+    if openai_ws is None:
+        # Sans OpenAI, MIA est muette : on termine — l'appelant (webhook)
+        # fermera la socket Telnyx et le client retombera sur la messagerie.
+        return
+    async with openai_ws:
         await _init_session(openai_ws, instructions, transcription_prompt)
         log.info("[%s] OpenAI connecté — %s (%d plats)", cid, restaurant.get("nom"), len(menu))
 
@@ -207,6 +279,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
         current_response_id = None             # ID de la réponse OpenAI active (pour cancel)
         pending_transfer = False               # True si on doit transférer après le goodbye
         last_client_text = ""                  # Dernière transcription du client (pour confirmation)
+        current_vad_silence = settings.vad_silence_duration_ms  # VAD adaptatif (cf. plus bas)
 
         # Dumper audio optionnel (debug du flux entrant). Activé via env
         # AUDIO_DEBUG_DIR. Écrit un .wav µ-law avec les 5 premières secondes
@@ -308,6 +381,7 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
         async def send_to_client():
             """Lit les events OpenAI : audio sortant, function calls, barge-in."""
             nonlocal last_item, current_response_id, pending_transfer, last_client_text
+            nonlocal current_vad_silence
             async for msg in openai_ws:
                 resp = json.loads(msg)
                 t = resp.get("type", "")
@@ -338,6 +412,25 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                     if transcript:
                         conv.info("[%s] 🤖 MIA    : %s", cid, transcript)
                         call_log.add_mia(transcript)
+
+                        # ─── VAD ADAPTATIF ───
+                        # Si MIA vient de poser une question de validation
+                        # (« Je valide ? »), la réponse attendue est courte
+                        # (« oui ») : on abaisse le silence VAD pour ce tour
+                        # (~-400ms de latence sur le tour le plus critique).
+                        # Sinon on restaure la valeur par défaut. La règle est
+                        # ré-évaluée à CHAQUE tour de MIA → auto-corrective.
+                        target_ms = (settings.vad_confirmation_silence_ms
+                                     if expects_short_reply(transcript)
+                                     else settings.vad_silence_duration_ms)
+                        if target_ms > 0 and target_ms != current_vad_silence:
+                            current_vad_silence = target_ms
+                            await openai_ws.send(json.dumps({
+                                "type": "session.update", "session": {
+                                    "type": "realtime",
+                                    "audio": {"input": {
+                                        "turn_detection": _vad_config(target_ms)}}}}))
+                            log.info("[%s] VAD silence → %dms", cid, target_ms)
 
                 # --- Audio sortant (MIA parle) → forward vers Telnyx ---
                 if t == "response.output_audio.delta" and resp.get("delta") and stream_sid:
@@ -422,9 +515,13 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             await openai_ws.send(json.dumps({"type": "response.create"}))
                             continue  # passe au prochain item sans exécuter le tool
 
-                        # asyncio.to_thread : le tool fait du SQL synchrone + HTTP SMS.
+                        # asyncio.to_thread : le tool fait du SQL synchrone.
                         # On le déporte sur un thread pour ne pas bloquer la boucle
                         # asyncio qui sert l'audio en parallèle.
+                        # defer_sms=True : les SMS ne sont PAS envoyés dans le
+                        # tool (2 requêtes HTTP, timeout 15s chacune) mais
+                        # récupérés dans sms_outbox et envoyés en arrière-plan
+                        # APRÈS avoir débloqué la réponse vocale de MIA.
                         result = await asyncio.to_thread(
                             execute_tool_call, restaurant["id"], tool_name, args,
                             menu=menu, quota_reservations=restaurant.get("quota_reservations"),
@@ -433,7 +530,11 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             caller_phone=caller_phone or None,
                             restaurant_name=restaurant.get("nom", ""),
                             sms_to_client=restaurant.get("sms_to_client", True),
-                            sms_to_restaurant=restaurant.get("sms_to_restaurant", True))
+                            sms_to_restaurant=restaurant.get("sms_to_restaurant", True),
+                            defer_sms=True)
+                        # Pop AVANT toute sérialisation : les numéros de téléphone
+                        # ne doivent fuiter ni vers OpenAI ni dans le call_log.
+                        sms_outbox = result.pop("sms_outbox", [])
                         conv.info("[%s] ✓ Result : success=%s%s", cid, result.get("success"),
                                   f" code={result['code']}" if result.get("code") else "")
 
@@ -450,6 +551,10 @@ async def run_realtime_bridge(client_ws: WebSocket, restaurant: dict, *, menu=No
                             "type": "function_call_output", "call_id": item.get("call_id"),
                             "output": json.dumps(result)}}))
                         await openai_ws.send(json.dumps({"type": "response.create"}))
+
+                        # SMS en parallèle de la réponse vocale (fire-and-forget).
+                        if sms_outbox:
+                            _spawn_sms_tasks(sms_outbox, cid)
 
                     # Transfert effectif : on attend ici la fin de la réponse-parole
                     # qui SUIT le function_call (pas la réponse du function_call).

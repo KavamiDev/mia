@@ -109,3 +109,34 @@ def is_confirmed(text: str) -> bool:
     Cas ambigus comme « oui mais attendez » → False (la prudence prévaut).
     """
     return has_confirmation(text) and not has_rejection(text)
+
+
+# Questions de validation posées par MIA — quand son tour se termine par l'une
+# d'elles, la réponse attendue du client est COURTE (« oui », « non », « c'est
+# bon »). Le bridge en profite pour abaisser temporairement le silence VAD :
+# pas besoin d'attendre 900ms pour clôturer un « oui ».
+_SHORT_REPLY_PATTERNS = [
+    r"\bje valide\b",
+    r"\bon valide\b",
+    r"\bje confirme\b",
+    r"\bconfirmez\b",            # « vous me confirmez par un OUI ? »
+    r"\bc est bien ca\b",        # « c'est bien ça ? »
+    r"\bc est bon pour vous\b",
+    r"\bon est bon\b",
+    r"\bvous etes toujours la\b",  # relance après silence
+]
+
+# On ne regarde que la FIN du tour de MIA : une tournure comme « je valide »
+# au milieu d'une longue phrase de clôture ne doit pas déclencher le mode.
+_SHORT_REPLY_TAIL_CHARS = 80
+
+
+def expects_short_reply(text: str) -> bool:
+    """True si le tour de MIA se termine par une question de validation.
+
+    Sert au VAD adaptatif : réponse courte attendue → silence VAD réduit.
+    """
+    if not text:
+        return False
+    tail = _normalize(text).strip()[-_SHORT_REPLY_TAIL_CHARS:]
+    return any(re.search(p, tail) for p in _SHORT_REPLY_PATTERNS)

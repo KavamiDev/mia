@@ -105,6 +105,14 @@ class Settings:
     vad_prefix_padding_ms: int = _i("VAD_PREFIX_PADDING_MS", 400) # Capture mieux le DÉBUT du mot
     vad_silence_duration_ms: int = _i("VAD_SILENCE_DURATION_MS", 900)   # Silence min — laisse les "oui" courts être captés
 
+    # VAD adaptatif : quand MIA vient de poser une question de validation
+    # (« Je valide ? »), la réponse attendue est courte (« oui ») — pas besoin
+    # d'attendre 900ms de silence. On abaisse temporairement le VAD à cette
+    # valeur pour ce tour-là, puis on restaure 900ms au tour suivant.
+    # Gain : ~400ms de latence sur le tour le plus critique de l'appel.
+    # Mettre 0 pour désactiver (kill-switch sans redéploiement).
+    vad_confirmation_silence_ms: int = _i("VAD_CONFIRMATION_SILENCE_MS", 500)
+
     # --- AGC (Auto-Gain Control) sur l'audio entrant ---
     # Au lieu d'un gain fixe (qui sature les voix fortes et sous-amplifie les
     # voix faibles), on ajuste dynamiquement le gain pour chaque chunk afin
@@ -115,6 +123,34 @@ class Settings:
     # Mode gain fixe LEGACY : si > 0, on bypass l'AGC et on applique ce gain.
     # Utile pour debug / A/B. Mettre 0 pour activer l'AGC normale.
     audio_input_gain: float = _f("AUDIO_INPUT_GAIN", 0.0)
+
+    # --- Connexion OpenAI Realtime ---
+    # Nombre total de tentatives de connexion WSS au début d'un appel.
+    # Backoff exponentiel : 0.5s, 1s, 2s... Un blip réseau transitoire ne doit
+    # pas faire perdre l'appel (le client entend juste 1-2s de silence en plus).
+    openai_connect_attempts: int = _i("OPENAI_CONNECT_ATTEMPTS", 3)
+
+    # --- Pool PostgreSQL ---
+    # pool_size : connexions persistantes. max_overflow : connexions
+    # supplémentaires temporaires en pic. pool_timeout : attente max d'une
+    # connexion libre avant erreur (fail-fast plutôt que bloquer un appel).
+    # Ignoré sous SQLite (tests).
+    db_pool_size: int = _i("DB_POOL_SIZE", 10)
+    db_max_overflow: int = _i("DB_MAX_OVERFLOW", 20)
+    db_pool_timeout: int = _i("DB_POOL_TIMEOUT", 10)
+
+    # --- Cache contexte d'appel (restaurant + menu) ---
+    # Évite les SELECT restaurant/menu à chaque décrochage. TTL court : une
+    # modification de menu est visible au plus tard après ce délai (et les
+    # mutations API/dashboard invalident immédiatement). 0 = désactivé.
+    restaurant_cache_ttl_seconds: int = _i("RESTAURANT_CACHE_TTL_SECONDS", 60)
+
+    # --- Protection webhook Telnyx ---
+    # Limite de requêtes POST /voice/incoming par IP source et par minute.
+    # Protège la vérification Ed25519 + les lookups DB d'un flood. Telnyx
+    # n'envoie qu'une poignée d'events par appel : 300/min/IP est très large.
+    # 0 = désactivé.
+    webhook_rate_limit_per_minute: int = _i("WEBHOOK_RATE_LIMIT_PER_MINUTE", 300)
 
     # --- Debug audio (optionnel) ---
     # Si défini, dump les 5 premières secondes d'audio entrant de chaque appel

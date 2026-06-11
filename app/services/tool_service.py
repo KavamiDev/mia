@@ -59,29 +59,37 @@ def _short_date(date_iso: str) -> str:
 
 def execute_tool_call(restaurant_id: int, name: str, args: dict, *, menu, quota_reservations,
                       quota_commandes, restaurant_phone, caller_phone, restaurant_name,
-                      sms_to_client: bool = True, sms_to_restaurant: bool = True) -> dict:
+                      sms_to_client: bool = True, sms_to_restaurant: bool = True,
+                      defer_sms: bool = False) -> dict:
     """Point d'entrée unique appelé par realtime_service quand OpenAI émet un function_call.
 
     Args:
         sms_to_client : envoyer un SMS au client (default True, configurable par resto)
         sms_to_restaurant : envoyer un SMS au resto (default True, configurable)
+        defer_sms : si True, les SMS ne sont PAS envoyés ici — ils sont
+            retournés dans result["sms_outbox"] = [(to, body), ...] pour que
+            l'appelant les envoie en arrière-plan. Le bridge realtime s'en
+            sert pour sortir les 2 requêtes HTTP SMS (jusqu'à 15s de timeout
+            chacune) du chemin critique vocal : sans ça, le client attend en
+            silence DB + SMS avant d'entendre « votre réservation est
+            confirmée ».
     """
     tel = caller_phone or ""
     if name == "create_reservation":
         return _create_reservation(restaurant_id, args, tel, quota_reservations,
                                    restaurant_phone, restaurant_name,
-                                   sms_to_client, sms_to_restaurant)
+                                   sms_to_client, sms_to_restaurant, defer_sms)
     if name == "create_commande":
         return _create_commande(restaurant_id, args, tel, menu or [], quota_commandes,
                                 restaurant_phone, restaurant_name,
-                                sms_to_client, sms_to_restaurant)
+                                sms_to_client, sms_to_restaurant, defer_sms)
     if name == "transfer_to_human":
         return _transfer(args, restaurant_name)
     return {"success": False, "error": f"Fonction inconnue : {name}"}
 
 
 def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, restaurant_name,
-                        sms_to_client=True, sms_to_restaurant=True) -> dict:
+                        sms_to_client=True, sms_to_restaurant=True, defer_sms=False) -> dict:
     """Crée une réservation après vérification atomique du quota journalier.
 
     Pour éviter la race condition (2 appels en // qui voient le quota non
@@ -117,14 +125,18 @@ def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, resta
     # ─── SMS courts (économie : 1 SMS unique sous 160 chars) ───
     # Format date 15/06 au lieu de 2026-06-15, "Résa" au lieu de "Réservation".
     d = _short_date(date_req)
+    outbox: list[tuple[str, str]] = []
     if sms_to_restaurant and restaurant_phone:
         # Resto : code + personnes + date + heure + tel client (pour rappel possible)
         # Ex: "Résa R4T2K: 4p le 15/06 20h30. Tel +33692123456" → ~52 chars
-        send_sms(restaurant_phone, f"Résa {code}: {personnes}p le {d} {heure}. Tel {tel}")
+        outbox.append((restaurant_phone, f"Résa {code}: {personnes}p le {d} {heure}. Tel {tel}"))
     if sms_to_client and tel:
         # Client : minimal — code + récap (le restaurant_name est dans le sender MIA)
         # Ex: "Resa R4T2K OK: 4p le 15/06 20h30" → ~33 chars
-        send_sms(tel, f"Resa {code} OK: {personnes}p le {d} {heure}")
+        outbox.append((tel, f"Resa {code} OK: {personnes}p le {d} {heure}"))
+    if not defer_sms:
+        for to, body in outbox:
+            send_sms(to, body)
 
     log.info("Réservation créée : %s (%d pers. le %s à %s) sms_resto=%s sms_client=%s",
              code, personnes, date_req, heure,
@@ -136,14 +148,17 @@ def _create_reservation(restaurant_id, args, tel, quota, restaurant_phone, resta
     sms_msg = " Vous allez recevoir un SMS." if (sms_to_client and tel) else ""
     # Closing naturelle : code + récap + SMS + au revoir chaleureux + invitation à raccrocher.
     # Le client peut alors raccrocher sereinement.
-    return {"success": True, "code": code, "recap_vocal":
-            f"Parfait ! Votre réservation {_spell(code)} est confirmée. "
-            f"{personnes} personne{'s' if personnes > 1 else ''}, le {jour} à {heure}."
-            f"{sms_msg} Merci de votre appel, à bientôt, bonne journée !"}
+    result = {"success": True, "code": code, "recap_vocal":
+              f"Parfait ! Votre réservation {_spell(code)} est confirmée. "
+              f"{personnes} personne{'s' if personnes > 1 else ''}, le {jour} à {heure}."
+              f"{sms_msg} Merci de votre appel, à bientôt, bonne journée !"}
+    if defer_sms:
+        result["sms_outbox"] = outbox
+    return result
 
 
 def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, restaurant_name,
-                     sms_to_client=True, sms_to_restaurant=True) -> dict:
+                     sms_to_client=True, sms_to_restaurant=True, defer_sms=False) -> dict:
     """Crée une commande à emporter après calcul du total via le menu."""
     code = _code("C")
     prices = {m["nom_plat"].strip().lower(): float(m.get("prix", 0))
@@ -184,15 +199,19 @@ def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, re
     recap_short = ", ".join(f"{i['qty']}x {i['plat']}" for i in resolved)
     recap_full = ", ".join(f"{i['qty']} {i['plat']}" for i in resolved)
 
+    outbox: list[tuple[str, str]] = []
     if sms_to_restaurant and restaurant_phone:
         # Resto : code + items + total + tel client
         # Ex: "Cmd C7XYZ: 2x Pizza Reine, 1x Coca. 31€. Tel +33692123456" → ~63 chars
-        send_sms(restaurant_phone,
-                 f"Cmd {code}: {recap_short}. {total:.0f}€. Tel {tel}")
+        outbox.append((restaurant_phone,
+                       f"Cmd {code}: {recap_short}. {total:.0f}€. Tel {tel}"))
     if sms_to_client and tel:
         # Client : code + total uniquement (le détail est dans le récap vocal)
         # Ex: "Cmd C7XYZ OK: 31€. À récupérer au resto." → ~40 chars
-        send_sms(tel, f"Cmd {code} OK: {total:.0f}€. À récupérer au resto.")
+        outbox.append((tel, f"Cmd {code} OK: {total:.0f}€. À récupérer au resto."))
+    if not defer_sms:
+        for to, body in outbox:
+            send_sms(to, body)
 
     log.info("Commande créée : %s (%.2f€, %d items) sms_resto=%s sms_client=%s",
              code, total, len(resolved),
@@ -200,9 +219,12 @@ def _create_commande(restaurant_id, args, tel, menu, quota, restaurant_phone, re
              sms_to_client and bool(tel))
 
     sms_msg = " Vous allez recevoir un SMS." if (sms_to_client and tel) else ""
-    return {"success": True, "code": code, "recap_vocal":
-            f"Parfait ! Votre commande {_spell(code)} est enregistrée : {recap_full}. "
-            f"Total : {total:.2f} euros.{sms_msg} Merci, à tout à l'heure, bonne journée !"}
+    result = {"success": True, "code": code, "recap_vocal":
+              f"Parfait ! Votre commande {_spell(code)} est enregistrée : {recap_full}. "
+              f"Total : {total:.2f} euros.{sms_msg} Merci, à tout à l'heure, bonne journée !"}
+    if defer_sms:
+        result["sms_outbox"] = outbox
+    return result
 
 
 def _transfer(args, restaurant_name) -> dict:
